@@ -93,21 +93,6 @@ In both interfaces, you can use special commands to trigger web searches:
 5. The local Ollama model receives this prompt and generates an informed response
 6. The response is displayed to the user with search attribution
 
-## Architecture
-
-```
-┌────────── ─┐      ┌──────────┐      ┌────── ┐
-│  Chat Clients  │   <---->│   MCP Server    │<---->│ Serper.dev│
-│ (CLI or Gradio)│         │  (server.py)    │      │  API      │
-└───────┬─── ┘      └──────────┘      └───────┘
-        │
-        ▼
-┌─────────┐
-│     Ollama     │
-│  Local LLM     │
-└─────────┘
-```
-
 ## File Structure
 
 - `server.py` - MCP server with web search tool
