@@ -18,10 +18,12 @@ from bson import ObjectId
 from pymongo import MongoClient
 from pymongo.errors import ConnectionFailure, OperationFailure
 
-# MCP Imports - Updated for MCP 1.6.0
+# MCP Imports - Updated for fastmcp v2.x
 import subprocess
 from mcp import ClientSession
-from mcp.client.stdio import stdio_client  # Use stdio_client function instead of StdioClientTransport
+# from mcp.client.stdio import stdio_client # Old (v0.4.1 / MCP 1.6.0 style)
+from fastmcp.client.transports import StdioServerParameters, stdio_client # New (v2.x)
+
 
 import ollama 
 import time 
@@ -92,21 +94,22 @@ app_state = AppState()
 async def mcp_service_loop():
     logger.info("MCP_SERVICE_LOOP: Starting STDIO client loop...")
     
+    # This logger might be used by the fastmcp library if it's configured to pick up standard loggers.
     mcp_client_comms_logger = logger.getChild("mcp_client_comms")
     mcp_client_comms_logger.setLevel(logging.DEBUG)
 
+    server_params = StdioServerParameters(
+        command=MCP_SERVER_COMMAND[0],  # "fastmcp"
+        args=MCP_SERVER_COMMAND[1:],    # ["run", "server_search.py"]
+        cwd=_main_py_dir
+    )
+
     while True:
         try:
-            logger.info(f"MCP_SERVICE_LOOP: Starting FastMCP server subprocess: {' '.join(MCP_SERVER_COMMAND)}")
+            logger.info(f"MCP_SERVICE_LOOP: Starting FastMCP server subprocess with params: {server_params}")
             
-            # Use stdio_client context manager - this is the MCP 1.6.0 way
-            async with stdio_client(
-                command=MCP_SERVER_COMMAND[0],  # "fastmcp"
-                args=MCP_SERVER_COMMAND[1:],    # ["run", "server_search.py"]
-                env=None,  # Use default environment
-                cwd=_main_py_dir,  # Run in backend directory
-                logger=mcp_client_comms_logger
-            ) as streams:
+            # Use stdio_client context manager with StdioServerParameters
+            async with stdio_client(server_params) as streams:
                 read, write = streams
                 logger.info("MCP_SERVICE_LOOP: Connected to FastMCP server via STDIO. Initializing ClientSession...")
                 
