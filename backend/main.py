@@ -242,7 +242,7 @@ class ConversationListItem(BaseModel):
 
 
 async def process_chat_request(payload: ChatPayload) -> ChatResponse:
-    if not conversations_collection:
+    if conversations_collection is None:
         raise HTTPException(status_code=503, detail="MongoDB service not available.")
 
     user_message_content = payload.user_message
@@ -381,7 +381,7 @@ async def get_status():
 
 @app.get("/api/conversations", response_model=List[ConversationListItem])
 async def list_conversations():
-    if not conversations_collection:
+    if conversations_collection is None:
         raise HTTPException(status_code=503, detail="MongoDB service not available.")
     try:
         convs_cursor = conversations_collection.find(
@@ -407,7 +407,7 @@ async def list_conversations():
 
 @app.get("/api/conversations/{conversation_id}", response_model=List[ChatMessage])
 async def get_conversation_messages(conversation_id: str):
-    if not conversations_collection:
+    if conversations_collection is None:
         raise HTTPException(status_code=503, detail="MongoDB service not available.")
     if not ObjectId.is_valid(conversation_id):
         raise HTTPException(status_code=400, detail="Invalid conversation_id format.")
@@ -435,7 +435,7 @@ else:
 
 # --- Main Application Logic ---
 def main_backend():
-    if not conversations_collection:
+    if conversations_collection is None:
         logger.warning("MongoDB is not connected. Persistence features will be unavailable.")
     
     service_thread = threading.Thread(target=run_mcp_service, daemon=True)
