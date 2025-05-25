@@ -11,7 +11,7 @@ from fastapi import FastAPI, HTTPException, Request, Response, status
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, constr
 from bson import ObjectId
 from pymongo import MongoClient
 from pymongo.errors import ConnectionFailure, OperationFailure
@@ -246,6 +246,9 @@ class ConversationListItem(BaseModel):
         populate_by_name = True 
         json_encoders = {ObjectId: str, datetime: lambda dt: dt.isoformat()}
 
+class RenamePayload(BaseModel):
+    new_title: constr(strip_whitespace=True, min_length=1, max_length=100)
+
 
 async def get_default_ollama_model() -> str:
     try:
@@ -256,7 +259,6 @@ async def get_default_ollama_model() -> str:
         if models_response and hasattr(models_response, 'models') and isinstance(models_response.models, list) and models_response.models:
             actual_models_list = models_response.models
             
-            # The log shows Model objects have 'model' attribute for the tag.
             valid_models_with_tags = [
                 m for m in actual_models_list
                 if hasattr(m, 'model') and m.model 
@@ -271,7 +273,6 @@ async def get_default_ollama_model() -> str:
                     if m.details and hasattr(m.details, 'family') and m.details.family:
                         model_family = m.details.family.lower()
                     
-                    # Use m.model for the tag
                     model_tag_lower = m.model.lower() 
                     if 'embed' not in model_family and 'embed' not in model_tag_lower:
                         non_embedding_models.append(m.model)
@@ -281,7 +282,7 @@ async def get_default_ollama_model() -> str:
                     return non_embedding_models[0]
                 
                 logger.info(f"No non-embedding models found, falling back to the first available model with a tag: {valid_models_with_tags[0].model}")
-                return valid_models_with_tags[0].model # Use .model
+                return valid_models_with_tags[0].model 
         
         logger.warning("No Ollama models found or 'models' attribute is not a non-empty list in API response when determining default. Falling back to hardcoded default.")
     except Exception as e:
@@ -315,25 +316,25 @@ async def process_chat_request(payload: ChatPayload) -> ChatResponse:
         else:
             raise HTTPException(status_code=404, detail=f"Conversation with ID '{conversation_id}' not found.")
 
-    if not model_for_conversation: # True for new chats or if model was not stored in existing convo
+    if not model_for_conversation: 
         if payload.ollama_model_name:
             model_for_conversation = payload.ollama_model_name
         else:
             model_for_conversation = await get_default_ollama_model()
             logger.info(f"No model specified in payload or conversation, using determined default: {model_for_conversation}")
     
-    if not conversation_id: # New chat
+    if not conversation_id: 
         new_conv_doc = {
             "title": f"Chat started {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}",
             "created_at": datetime.now(timezone.utc),
             "updated_at": datetime.now(timezone.utc),
             "messages": [],
-            "ollama_model_name": model_for_conversation # Store the model for new chat
+            "ollama_model_name": model_for_conversation 
         }
         result = conversations_collection.insert_one(new_conv_doc)
         conversation_id = str(result.inserted_id)
         conv_object_id = result.inserted_id
-    elif conv_object_id and conversation and not conversation.get("ollama_model_name"): # Existing conversation missing model, update it
+    elif conv_object_id and conversation and not conversation.get("ollama_model_name"): 
         conversations_collection.update_one(
             {"_id": conv_object_id},
             {"$set": {"ollama_model_name": model_for_conversation, "updated_at": datetime.now(timezone.utc)}}
@@ -365,7 +366,7 @@ async def process_chat_request(payload: ChatPayload) -> ChatResponse:
     search_performed_indicator_html = None
 
     if payload.use_search and app_state.service_ready:
-        query = user_message_content # Using the full user message as query for now
+        query = user_message_content 
         logger.info(f"[MCP] Search active. Querying for: '{query}' with model {model_for_conversation}")
         try:
             request_id = submit_search_request(query)
@@ -446,9 +447,6 @@ async def get_status():
         ollama_available = True
     except Exception:
         ollama_available = False
-        # This warning is fine, as status check is non-critical for this specific error.
-        # logger.warning("Ollama server not responding to list command for status check.")
-
     return {
         "service_ready": app_state.service_ready, 
         "db_connected": conversations_collection is not None,
@@ -464,9 +462,6 @@ async def list_ollama_models():
 
         if models_response and hasattr(models_response, 'models') and isinstance(models_response.models, list):
             actual_models_list = models_response.models
-            
-            # The log shows Model objects have 'model' attribute for the tag.
-            # Filter for models that have a truthy 'model' attribute
             model_tags = [m.model for m in actual_models_list if hasattr(m, 'model') and m.model]
             
             if not model_tags:
@@ -578,6 +573,63 @@ async def delete_conversation(conversation_id: str):
     except Exception as e:
         logger.error(f"Unexpected error while deleting conversation {conversation_id}: {e}", exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="An unexpected error occurred during deletion.")
+
+@app.put("/api/conversations/{conversation_id}/rename", response_model=ConversationListItem, response_model_by_alias=False)
+async def rename_conversation_title(conversation_id: str, payload: RenamePayload):
+    if conversations_collection is None:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="MongoDB service not available.")
+    
+    if not ObjectId.is_valid(conversation_id):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid conversation_id format.")
+    
+    obj_id = ObjectId(conversation_id)
+    
+    try:
+        # Check if conversation exists
+        conversation = conversations_collection.find_one({"_id": obj_id}, {"messages": 0}) # Exclude messages for this check
+        if not conversation:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found.")
+
+        # Update the title and updated_at timestamp
+        new_timestamp = datetime.now(timezone.utc)
+        update_result = conversations_collection.update_one(
+            {"_id": obj_id},
+            {"$set": {"title": payload.new_title, "updated_at": new_timestamp}}
+        )
+        
+        if update_result.matched_count == 0: # Should be caught by find_one above, but as a safeguard
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found during update.")
+
+        # Fetch the updated document to return it
+        updated_conv_doc = conversations_collection.find_one({"_id": obj_id})
+        if not updated_conv_doc: # Should not happen if update was successful
+             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to retrieve updated conversation.")
+
+
+        # Recalculate message_count as it's not stored with the main doc if we excluded messages before
+        full_conv_doc_for_count = conversations_collection.find_one({"_id": obj_id}, {"messages": 1})
+        message_count = len(full_conv_doc_for_count.get("messages", [])) if full_conv_doc_for_count else 0
+
+        item_data_for_validation = dict(updated_conv_doc)
+        if "_id" in item_data_for_validation and isinstance(item_data_for_validation["_id"], ObjectId):
+            item_data_for_validation["_id"] = str(item_data_for_validation["_id"])
+        item_data_for_validation["message_count"] = message_count
+        
+        # Ensure model name is present
+        if "ollama_model_name" not in item_data_for_validation or not item_data_for_validation["ollama_model_name"]:
+            item_data_for_validation["ollama_model_name"] = await get_default_ollama_model()
+            
+        logger.info(f"Successfully renamed conversation ID {conversation_id} to '{payload.new_title}'")
+        return ConversationListItem.model_validate(item_data_for_validation)
+
+    except HTTPException: # Re-raise known HTTP exceptions
+        raise
+    except OperationFailure as e:
+        logger.error(f"MongoDB operation failure while renaming conversation {conversation_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Database operation failed during rename.")
+    except Exception as e:
+        logger.error(f"Unexpected error while renaming conversation {conversation_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="An unexpected error occurred during rename.")
 
 
 # Serve static files

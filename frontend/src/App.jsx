@@ -8,9 +8,10 @@ import {
   getConversations, 
   getConversationMessages,
   getOllamaModels,
-  deleteConversation // Import new API function
+  deleteConversation,
+  renameConversation // Import new API function
 } from './services/api';
-import { AlertTriangle, Wifi, Server, Database, Loader2, BrainCircuit } from 'lucide-react';
+import { AlertTriangle, Wifi, Database, Loader2, BrainCircuit, PanelLeftClose, PanelRightOpen } from 'lucide-react';
 
 const App = () => {
   const [chatHistory, setChatHistory] = useState([]);
@@ -29,8 +30,10 @@ const App = () => {
   const [isChatHistoryLoading, setIsChatHistoryLoading] = useState(false);
 
   const [availableOllamaModels, setAvailableOllamaModels] = useState([]);
-  const [selectedOllamaModel, setSelectedOllamaModel] = useState(''); // For new chats
+  const [selectedOllamaModel, setSelectedOllamaModel] = useState(''); 
   const [ollamaModelsError, setOllamaModelsError] = useState(null);
+
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false); // New state for sidebar
 
   const chatContainerRef = useRef(null);
 
@@ -72,7 +75,7 @@ const App = () => {
       setOllamaAvailable(false);
       setConversationsError("Failed to fetch service status. History may be unavailable.");
     }
-  }, [conversationsError]); // Removed dbConnected from deps as it's set inside
+  }, [conversationsError]); 
 
   useEffect(() => {
     fetchServiceStatus(); 
@@ -88,7 +91,6 @@ const App = () => {
         const models = await getOllamaModels();
         setAvailableOllamaModels(models || []);
         if (models && models.length > 0) {
-          // Try to find a sensible default, e.g., not an embedding model
           const preferredModel = models.find(m => !m.toLowerCase().includes("embed") && (m.toLowerCase().includes("instruct") || m.toLowerCase().includes("chat"))) || models[0];
           setSelectedOllamaModel(preferredModel);
         } else {
@@ -102,7 +104,7 @@ const App = () => {
         setSelectedOllamaModel('');
       }
     };
-    if (ollamaAvailable) { // Only fetch models if Ollama server is available
+    if (ollamaAvailable) { 
         fetchModels();
     } else {
         setAvailableOllamaModels([]);
@@ -137,7 +139,7 @@ const App = () => {
              setConversationsError("Database not connected. History is unavailable.");
         }
     }
-  }, [dbConnected, fetchConversationsList, conversationsError]); // Added conversationsError to deps
+  }, [dbConnected, fetchConversationsList, conversationsError]); 
 
 
   useEffect(() => {
@@ -148,15 +150,10 @@ const App = () => {
         try {
           const messages = await getConversationMessages(currentConversationId);
           setChatHistory(messages || []);
-          // Update selected model based on current conversation if needed,
-          // though the display logic handles this using `conversations` list.
           const currentConv = conversations.find(c => c.id === currentConversationId);
           if (currentConv && currentConv.ollama_model_name) {
-            // This ensures if user switches to an old convo, the model dropdown (if visible)
-            // doesn't mislead. However, the primary display of model is now text.
-            // setSelectedOllamaModel(currentConv.ollama_model_name);
+            // setSelectedOllamaModel(currentConv.ollama_model_name); // Not strictly needed if model display is text-only for existing
           }
-
         } catch (err) {
           const errorDetail = err.detail || err.message || `Failed to load messages for conversation.`;
           setError(errorDetail); 
@@ -170,14 +167,13 @@ const App = () => {
       }
     };
     loadMessages();
-  }, [currentConversationId, initialWelcomeMessage, conversations]); // Added conversations to ensure model name is available
+  }, [currentConversationId, initialWelcomeMessage, conversations]);
 
 
   const handleSendMessage = async (userInput) => {
     setIsLoading(true);
     setError(null); 
 
-    // For new chats, use the selectedOllamaModel. For existing, backend uses stored model.
     const modelForThisMessage = currentConversationId ? null : selectedOllamaModel;
 
     if (!modelForThisMessage && !currentConversationId && availableOllamaModels.length > 0) {
@@ -185,8 +181,13 @@ const App = () => {
         setIsLoading(false);
         return;
     }
-    if (!modelForThisMessage && !currentConversationId && availableOllamaModels.length === 0) {
+    if (!modelForThisMessage && !currentConversationId && availableOllamaModels.length === 0 && ollamaAvailable) {
         setError("No Ollama models available. Cannot start chat.");
+        setIsLoading(false);
+        return;
+    }
+    if(!ollamaAvailable){
+        setError("Ollama server is not available. Cannot start chat.");
         setIsLoading(false);
         return;
     }
@@ -199,15 +200,9 @@ const App = () => {
       
       if (response.conversation_id && response.conversation_id !== currentConversationId) {
         setCurrentConversationId(response.conversation_id);
-        // The new conversation will have the model name, so fetchConversationsList will update it.
         await fetchConversationsList(); 
-      } else if (!response.conversation_id && currentConversationId) { // Should not happen with current backend logic
-        setCurrentConversationId(null);
-        await fetchConversationsList();
       } else if (response.conversation_id === currentConversationId) {
-        // If it's the same conversation, we might still want to refresh the list
-        // in case title or message_count changed, or if model was backfilled.
-        await fetchConversationsList();
+        await fetchConversationsList(); // Refresh for message count or title changes
       }
       
     } catch (err) {
@@ -221,11 +216,6 @@ const App = () => {
   const handleSelectConversation = (conversationId) => {
     if (conversationId !== currentConversationId) {
       setCurrentConversationId(conversationId);
-      const selectedConv = conversations.find(c => c.id === conversationId);
-      if (selectedConv && selectedConv.ollama_model_name) {
-        // This is more for if the dropdown was still active, but good to keep consistent
-        // setSelectedOllamaModel(selectedConv.ollama_model_name);
-      }
     }
   };
 
@@ -234,7 +224,6 @@ const App = () => {
     setChatHistory([initialWelcomeMessage]); 
     setIsSearchActive(false); 
     setError(null); 
-    // Reset selected model to default or user's last choice for new chats
     if (availableOllamaModels.length > 0 && !selectedOllamaModel) {
         const preferredModel = availableOllamaModels.find(m => !m.toLowerCase().includes("embed") && (m.toLowerCase().includes("instruct") || m.toLowerCase().includes("chat"))) || availableOllamaModels[0];
         setSelectedOllamaModel(preferredModel);
@@ -247,14 +236,35 @@ const App = () => {
       await deleteConversation(conversationIdToDelete);
       setConversations(prevConvs => prevConvs.filter(conv => conv.id !== conversationIdToDelete));
       if (currentConversationId === conversationIdToDelete) {
-        handleNewChat(); // Reset to new chat state if current one is deleted
+        handleNewChat(); 
       }
     } catch (err) {
       const errorMessage = err.detail || err.message || 'Failed to delete conversation.';
-      setError(errorMessage); // Display error to user
-      // Optionally, re-fetch conversations if delete failed to ensure UI consistency
+      setError(errorMessage); 
+    }
+  };
+
+  const handleRenameConversation = async (conversationIdToRename, newTitle) => {
+    setError(null);
+    try {
+      const updatedConversation = await renameConversation(conversationIdToRename, newTitle);
+      setConversations(prevConvs => 
+        prevConvs.map(conv => 
+          conv.id === conversationIdToRename 
+            ? { ...conv, title: updatedConversation.title, updated_at: updatedConversation.updated_at } 
+            : conv
+        ).sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at)) // Re-sort if needed
+      );
+    } catch (err) {
+      const errorMessage = err.detail || err.message || 'Failed to rename conversation.';
+      setError(errorMessage);
+      // Optionally re-fetch to revert optimistic update or ensure consistency
       // fetchConversationsList(); 
     }
+  };
+  
+  const toggleSidebarCollapse = () => {
+    setIsSidebarCollapsed(prev => !prev);
   };
 
   const toggleSearch = () => {
@@ -269,28 +279,39 @@ const App = () => {
 
 
   return (
-    <div className="flex h-screen bg-brand-main-bg text-brand-text-primary">
+    <div className="flex h-screen bg-brand-main-bg text-brand-text-primary overflow-hidden">
       <ConversationSidebar
         conversations={conversations}
         currentConversationId={currentConversationId}
         onSelectConversation={handleSelectConversation}
         onNewChat={handleNewChat}
-        onDeleteConversation={handleDeleteConversation} // Pass down the new handler
+        onDeleteConversation={handleDeleteConversation}
+        onRenameConversation={handleRenameConversation}
         isLoading={isConversationsLoading}
         dbConnected={dbConnected}
-        conversationsError={conversationsError} 
+        conversationsError={conversationsError}
+        isCollapsed={isSidebarCollapsed}
+        onToggleCollapse={toggleSidebarCollapse}
       />
-      <div className="flex flex-col flex-grow h-screen">
+      <div className={`flex flex-col flex-grow h-screen transition-all duration-300 ease-in-out ${isSidebarCollapsed ? 'ml-0' : 'ml-0'}`}> {/* Sidebar width is handled internally now */}
         {/* Header */}
-        <header className="p-4 bg-brand-surface-bg shadow-md border-b border-gray-700">
-          <h1 className="text-xl font-semibold text-brand-purple">Ollama Chat with MCP</h1>
-          <div className="text-xs text-brand-text-secondary flex items-center space-x-2 sm:space-x-4 mt-1 flex-wrap">
+        <header className="p-4 bg-brand-surface-bg shadow-md border-b border-gray-700 flex items-center justify-between">
+          <div className="flex items-center">
+            <button 
+              onClick={toggleSidebarCollapse} 
+              className="p-2 mr-2 rounded-md hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-brand-purple"
+              title={isSidebarCollapsed ? "Open sidebar" : "Close sidebar"}
+            >
+              {isSidebarCollapsed ? <PanelRightOpen size={20} /> : <PanelLeftClose size={20} />}
+            </button>
+            <h1 className="text-xl font-semibold text-brand-purple">Ollama Chat with MCP</h1>
+          </div>
+          <div className="text-xs text-brand-text-secondary flex items-center space-x-2 sm:space-x-4 flex-wrap">
               <span className={`flex items-center ${mcpServiceReady ? 'text-brand-success-green' : 'text-brand-alert-red'}`}>
                   {mcpServiceReady ? <Wifi size={14} className="mr-1" /> : <AlertTriangle size={14} className="mr-1" />}
                   Search: {mcpServiceReady ? 'Ready' : 'Unavailable'}
               </span>
               
-              {/* Ollama Model Display/Selector */}
               <div className="flex items-center">
                 <BrainCircuit size={14} className={`mr-1 ${ollamaAvailable ? 'text-brand-purple' : 'text-brand-alert-red'}`} />
                 {!currentConversationId ? (
@@ -322,7 +343,6 @@ const App = () => {
           </div>
         </header>
 
-        {/* Chat Messages */}
         <div ref={chatContainerRef} className="flex-grow p-4 overflow-y-auto space-y-2 bg-brand-main-bg">
           {isChatHistoryLoading && (
             <div className="flex justify-center items-center h-full">
@@ -341,20 +361,18 @@ const App = () => {
           )}
         </div>
 
-        {/* Error Display for main chat window */}
         {error && (
           <div className="p-3 bg-brand-alert-red text-white text-sm flex items-center justify-center">
             <AlertTriangle size={18} className="mr-2" /> {error}
           </div>
         )}
 
-        {/* Chat Input */}
         <ChatInput
           onSendMessage={handleSendMessage}
           isLoading={isLoading || isChatHistoryLoading} 
           isSearchActive={isSearchActive}
           onToggleSearch={toggleSearch}
-          disabled={isChatHistoryLoading || isLoading || (!selectedOllamaModel && !currentConversationId && availableOllamaModels.length > 0) || !ollamaAvailable}
+          disabled={isChatHistoryLoading || isLoading || (!selectedOllamaModel && !currentConversationId && availableOllamaModels.length > 0 && ollamaAvailable) || !ollamaAvailable}
           placeholder={
             !ollamaAvailable ? "Ollama server unavailable..." :
             (!selectedOllamaModel && !currentConversationId && availableOllamaModels.length > 0) ? "Select a model to begin..." :

@@ -116,3 +116,18 @@ export const deleteConversation = async (conversationId) => {
       : new Error("Network error or server unavailable");
   }
 };
+
+export const renameConversation = async (conversationId, newTitle) => {
+  try {
+    const response = await apiClient.put(`/conversations/${conversationId}/rename`, { new_title: newTitle });
+    return response.data; // Expected: updated ConversationListItem
+  } catch (error) {
+    console.error(
+      `Error renaming conversation ${conversationId}:`,
+      error.response ? error.response.data : error.message,
+    );
+    throw error.response 
+      ? error.response.data 
+      : new Error("Network error or server unavailable");
+  }
+};
