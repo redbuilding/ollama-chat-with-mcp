@@ -6,6 +6,7 @@ from dotenv import load_dotenv, find_dotenv # Import find_dotenv
 import httpx
 from mcp.server.fastmcp import FastMCP
 import logging # Import standard logging
+import sys # Import the sys module
 
 # Get a logger for this module specifically for setup and script-level messages
 script_logger = logging.getLogger("server_search_script")
