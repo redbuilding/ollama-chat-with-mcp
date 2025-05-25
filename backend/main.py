@@ -18,10 +18,10 @@ from bson import ObjectId
 from pymongo import MongoClient
 from pymongo.errors import ConnectionFailure, OperationFailure
 
-# MCP Imports
+# MCP Imports - Updated for MCP 1.6.0
 import subprocess
 from mcp import ClientSession
-from mcp.client.stdio import StdioClientTransport
+from mcp.client.stdio import stdio_client  # Use stdio_client function instead of StdioClientTransport
 
 import ollama 
 import time 
@@ -93,38 +93,26 @@ async def mcp_service_loop():
     logger.info("MCP_SERVICE_LOOP: Starting STDIO client loop...")
     
     mcp_client_comms_logger = logger.getChild("mcp_client_comms")
-    mcp_client_comms_logger.setLevel(logging.DEBUG) # Or use parent logger's level
-
-    process = None # Ensure process is defined for finally block
+    mcp_client_comms_logger.setLevel(logging.DEBUG)
 
     while True:
         try:
             logger.info(f"MCP_SERVICE_LOOP: Starting FastMCP server subprocess: {' '.join(MCP_SERVER_COMMAND)}")
             
-            # Start the FastMCP server as a subprocess
-            process = await asyncio.create_subprocess_exec(
-                *MCP_SERVER_COMMAND,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE, # Capture stderr
-                cwd=_main_py_dir  # Run in backend directory
-            )
-            
-            logger.info(f"MCP_SERVICE_LOOP: FastMCP server subprocess started successfully (PID: {process.pid}).")
-            
-            # Create STDIO transport
-            transport = StdioClientTransport(
-                process.stdout,
-                process.stdin,
+            # Use stdio_client context manager - this is the MCP 1.6.0 way
+            async with stdio_client(
+                command=MCP_SERVER_COMMAND[0],  # "fastmcp"
+                args=MCP_SERVER_COMMAND[1:],    # ["run", "server_search.py"]
+                env=None,  # Use default environment
+                cwd=_main_py_dir,  # Run in backend directory
                 logger=mcp_client_comms_logger
-            )
-            
-            async with transport.connect() as (read, write):
+            ) as streams:
+                read, write = streams
                 logger.info("MCP_SERVICE_LOOP: Connected to FastMCP server via STDIO. Initializing ClientSession...")
                 
                 async with ClientSession(read, write) as session:
                     logger.info("MCP_SERVICE_LOOP: ClientSession created. Calling session.initialize()...")
-                    await session.initialize() # Add capabilities if needed, e.g., {"notifications": "optional"}
+                    await session.initialize()
                     
                     logger.info("MCP_SERVICE_LOOP: MCP session initialized successfully. Listing tools...")
                     tools_response = await session.list_tools()
@@ -146,7 +134,7 @@ async def mcp_service_loop():
 
                     if app_state.service_ready:
                         # Main service loop
-                        while True:
+                        while True: # This loop will break if the stdio_client or ClientSession contexts exit
                             if not request_queue.empty():
                                 request_data = request_queue.get_nowait()
                                 if request_data["type"] == "search":
@@ -154,52 +142,27 @@ async def mcp_service_loop():
                                     request_id = request_data["id"]
                                     try:
                                         logger.debug(f"MCP_SERVICE_LOOP: Calling 'web_search' tool with query: {query}")
-                                        result = await session.call_tool("web_search", {"query": query}) # result is CallToolResponse
+                                        result = await session.call_tool("web_search", {"query": query})
                                         logger.debug(f"MCP_SERVICE_LOOP: 'web_search' tool call successful. Result content type: {type(result.content)}")
-                                        # result.content is expected to be a dict if tool returns JSON
                                         response_queue.put({"id": request_id, "type": "search_result", "status": "success", "data": result.content})
-                                    except Exception as e_tool_call: # Catch mcp.error.MCPError or others
+                                    except Exception as e_tool_call: # Includes mcp.error.MCPError
                                         logger.error(f"MCP_SERVICE_LOOP: Error in 'web_search' tool call: {e_tool_call}", exc_info=True)
                                         response_queue.put({"id": request_id, "type": "search_result", "status": "error", "error": str(e_tool_call)})
                             
-                            # Check if subprocess is still alive
-                            if process.returncode is not None:
-                                stderr_output = ""
-                                if process.stderr:
-                                    stderr_bytes = await process.stderr.read()
-                                    stderr_output = stderr_bytes.decode(errors='replace')
-                                logger.error(f"MCP_SERVICE_LOOP: FastMCP server subprocess has terminated unexpectedly with code {process.returncode}. Stderr: {stderr_output}")
-                                break # Exit inner while loop to trigger reconnect
-                                
-                            await asyncio.sleep(0.1) # Yield control
+                            await asyncio.sleep(0.1) # Yield control, allow other tasks to run
 
         except FileNotFoundError:
-            logger.error(f"MCP_SERVICE_LOOP: 'fastmcp' command not found. Please ensure FastMCP is installed and in PATH: pip install fastmcp", exc_info=True)
-        except asyncio.TimeoutError as e_timeout: # This might be from session calls if they timeout
+            logger.error(f"MCP_SERVICE_LOOP: '{MCP_SERVER_COMMAND[0]}' command not found. Please ensure FastMCP is installed and in PATH: pip install fastmcp", exc_info=True)
+        except asyncio.TimeoutError as e_timeout: # Could be from session calls if they have timeouts
             logger.error(f"MCP_SERVICE_LOOP: TimeoutError in MCP service communication: {e_timeout}", exc_info=True)
-        except ConnectionRefusedError as e_conn_refused: # Should not happen with STDIO, but good to be aware
-            logger.error(f"MCP_SERVICE_LOOP: ConnectionRefusedError: {e_conn_refused}", exc_info=True)
-        except Exception as e_generic: # Catch-all for other issues during setup or main loop
-            logger.error(f"MCP_SERVICE_LOOP: Generic Exception during MCP service operation: {e_generic}", exc_info=True)
+        except Exception as e_generic: # Catch-all for other issues, including subprocess errors propagated by stdio_client
+            logger.error(f"MCP_SERVICE_LOOP: Generic Exception during MCP service operation (subprocess might have failed): {e_generic}", exc_info=True)
         finally:
+            # This block executes if the stdio_client context exits (normally or due to error)
+            # or if any other exception occurs in the try block.
             app_state.service_ready = False
-            # Clean up subprocess
-            if process and process.returncode is None: # Check if process was started and is still running
-                logger.info(f"MCP_SERVICE_LOOP: Terminating FastMCP server subprocess (PID: {process.pid})...")
-                process.terminate() # Send SIGTERM
-                try:
-                    await asyncio.wait_for(process.wait(), timeout=5.0)
-                    logger.info(f"MCP_SERVICE_LOOP: FastMCP server subprocess (PID: {process.pid}) terminated gracefully with code {process.returncode}.")
-                except asyncio.TimeoutError:
-                    logger.warning(f"MCP_SERVICE_LOOP: FastMCP server subprocess (PID: {process.pid}) didn't terminate gracefully after 5s, killing it (SIGKILL)...")
-                    process.kill() # Send SIGKILL
-                    await process.wait() # Ensure it's reaped
-                    logger.info(f"MCP_SERVICE_LOOP: FastMCP server subprocess (PID: {process.pid}) killed with code {process.returncode}.")
-            elif process and process.returncode is not None:
-                 logger.info(f"MCP_SERVICE_LOOP: FastMCP server subprocess (PID: {process.pid}) had already terminated with code {process.returncode}.")
-            
-            process = None # Reset process variable for the next iteration
-            logger.info("MCP_SERVICE_LOOP: Connection lost or failed. Will attempt to reconnect after a 10s delay.")
+            # stdio_client context manager handles subprocess cleanup.
+            logger.info("MCP_SERVICE_LOOP: Connection lost or FastMCP server subprocess ended. Will attempt to reconnect after a 10s delay.")
             await asyncio.sleep(10)
 
 
@@ -217,7 +180,7 @@ async def lifespan(app: FastAPI):
             await app_state.mcp_task
         except asyncio.CancelledError:
             logger.info("FastAPI Lifespan: MCP service client task successfully cancelled.")
-        except Exception as e:
+        except Exception as e: # Log any errors during mcp_task cancellation/shutdown
             logger.error(f"FastAPI Lifespan: Error during MCP service client task shutdown: {e}", exc_info=True)
     if mongo_client:
         mongo_client.close()
