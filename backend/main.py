@@ -101,13 +101,14 @@ async def mcp_service_loop():
     while True: 
         try:
             logger.info(f"MCP_SERVICE_LOOP: Setting CWD for subprocess to: {server_script_dir}")
+            # Use sys.executable to ensure the same Python interpreter is used for the subprocess
             server_params_for_client = StdioServerParameters(
-                command="python", 
-                args=[MCP_SERVER_SCRIPT_ABS_PATH], # Using absolute path for the script itself
+                command=sys.executable, # Changed back to sys.executable
+                args=[MCP_SERVER_SCRIPT_ABS_PATH], 
                 env=None,
-                cwd=server_script_dir # Explicitly set CWD to the script's directory
+                cwd=server_script_dir 
             )
-            logger.info(f"MCP_SERVICE_LOOP: Attempting to start MCP server using stdio_client with: command='python', args=['{MCP_SERVER_SCRIPT_ABS_PATH}'], cwd='{server_script_dir}'")
+            logger.info(f"MCP_SERVICE_LOOP: Attempting to start MCP server using stdio_client with: command='{sys.executable}', args=['{MCP_SERVER_SCRIPT_ABS_PATH}'], cwd='{server_script_dir}'")
             
             async with stdio_client(server_params_for_client, logger=mcp_client_comms_logger) as (read, write):
                 logger.info("MCP_SERVICE_LOOP: stdio_client context entered (implies subprocess started and pipes connected). Initializing ClientSession...")
