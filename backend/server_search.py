@@ -14,13 +14,18 @@ script_logger = logging.getLogger("server_search_script")
 # This ensures its messages are sent to stderr when run as a subprocess.
 script_logger.setLevel(logging.INFO)
 if not script_logger.hasHandlers(): # Add a handler if none are configured (e.g., when not run as __main__)
-    stderr_handler = logging.StreamHandler(sys.stderr)
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    stderr_handler = logging.StreamHandler(sys.stderr) # Ensure output to stderr
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - [SERVER_SEARCH_PY] %(message)s') # Add prefix
     stderr_handler.setFormatter(formatter)
     script_logger.addHandler(stderr_handler)
     script_logger.propagate = False # Prevent duplicate logging if root logger also has handlers
 
-script_logger.info(f"server_search.py: Script starting. CWD: {os.getcwd()}")
+script_logger.info(f"Script starting. Python Executable: {sys.executable}")
+script_logger.info(f"Python sys.path: {sys.path}")
+script_logger.info(f"Current Working Directory (CWD): {os.getcwd()}")
+script_logger.info(f"File __file__: {__file__}")
+script_logger.info(f"Absolute path of __file__: {os.path.abspath(__file__)}")
+
 
 # Create an MCP server instance using FastMCP
 mcp = FastMCP(
@@ -29,24 +34,26 @@ mcp = FastMCP(
     display_name="Web Search Server (Serper.dev)",
     description="Provides web search functionality via the Serper.dev API."
 )
+script_logger.info("FastMCP instance created.")
 
 # Load environment variables from .env file
 dotenv_path = find_dotenv(usecwd=False, raise_error_if_not_found=False)
 if dotenv_path:
-    script_logger.info(f"server_search.py: Loading .env file from: {dotenv_path}")
+    script_logger.info(f"Loading .env file from: {dotenv_path}")
     load_dotenv(dotenv_path)
 else:
-    script_logger.warning("server_search.py: No .env file found by find_dotenv(). Relying on default load_dotenv() or existing environment variables.")
+    script_logger.warning("No .env file found by find_dotenv(). Relying on default load_dotenv() or existing environment variables.")
     load_dotenv() 
 
 SERPER_API_KEY = os.getenv("SERPER_API_KEY")
-if SERPER_API_KEY:
-    script_logger.info("server_search.py: SERPER_API_KEY found in environment.")
+if SERPER_API_KEY and len(SERPER_API_KEY) > 5 : # Basic check if key looks somewhat valid
+    script_logger.info(f"SERPER_API_KEY found (length: {len(SERPER_API_KEY)}).")
 else:
-    script_logger.critical("server_search.py: SERPER_API_KEY environment variable NOT FOUND. This script will now raise ValueError.")
-    raise ValueError("SERPER_API_KEY environment variable not set. Please ensure it's in your .env file or environment.")
+    script_logger.critical(f"SERPER_API_KEY environment variable NOT FOUND or is too short (length: {len(SERPER_API_KEY) if SERPER_API_KEY else 0}). This script will now raise ValueError.")
+    raise ValueError("SERPER_API_KEY environment variable not set or invalid. Please ensure it's in your .env file or environment.")
 
 SERPER_API_URL = "https://google.serper.dev/search"
+script_logger.info("Environment variables processed. SERPER_API_URL configured.")
 
 
 # Register an asynchronous tool for performing web searches
@@ -105,15 +112,20 @@ async def web_search(query: str) -> dict:
         mcp.logger.exception(f"Unexpected error during web_search for query '{query}': {e}")
         return { "status": "error", "message": str(e), "results": [] }
 
+script_logger.info("web_search tool defined.")
+
 if __name__ == "__main__":
     # If run directly, ensure basicConfig is called if not already by the script_logger setup
-    if not logging.getLogger().hasHandlers(): # Check root logger
-        logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    # This basicConfig might not be hit if the script_logger already added a handler.
+    if not logging.getLogger().hasHandlers() and not script_logger.hasHandlers():
+        logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - [SERVER_SEARCH_PY __main__] %(message)s')
     
-    script_logger.info("Starting Web Search MCP Server (server_search.py directly)...")
+    script_logger.info("Attempting to start mcp.run() directly...")
     try:
         mcp.run()
     except Exception as e: 
-        script_logger.exception("Web Search MCP Server (server_search.py directly) crashed during run.")
+        script_logger.exception("mcp.run() crashed when called directly.")
     finally:
-        script_logger.info("Web Search MCP Server (server_search.py directly) stopped.")
+        script_logger.info("mcp.run() (called directly) finished or crashed.")
+else:
+    script_logger.info("Script is NOT being run as __main__. mcp.run() will likely be called by an importer if this is an MCP server.")

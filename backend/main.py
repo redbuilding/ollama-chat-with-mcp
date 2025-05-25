@@ -94,19 +94,22 @@ async def mcp_service_loop():
         return
 
     mcp_client_comms_logger = logger.getChild("mcp_client_comms")
-    mcp_client_comms_logger.setLevel(logging.DEBUG) 
+    mcp_client_comms_logger.setLevel(logging.DEBUG) # Ensure this logger captures DEBUG from MCP client library
 
     while True: 
         try:
+            # Experiment: Use "python" as command, similar to old chat_client.py
+            # Keep absolute path for the script argument for clarity.
             server_params_for_client = StdioServerParameters(
-                command=sys.executable,
+                command="python", # Changed from sys.executable
                 args=[MCP_SERVER_SCRIPT_ABS_PATH], 
                 env=None 
             )
-            logger.info(f"MCP_SERVICE_LOOP: Attempting to start MCP server using stdio_client with: {sys.executable} {MCP_SERVER_SCRIPT_ABS_PATH}")
+            logger.info(f"MCP_SERVICE_LOOP: Attempting to start MCP server using stdio_client with: command='python', args=['{MCP_SERVER_SCRIPT_ABS_PATH}']")
             
+            # The stdio_client's logger should capture stderr from server_search.py
             async with stdio_client(server_params_for_client, logger=mcp_client_comms_logger) as (read, write):
-                logger.info("MCP_SERVICE_LOOP: stdio_client connected. Initializing ClientSession...")
+                logger.info("MCP_SERVICE_LOOP: stdio_client context entered (implies subprocess started and pipes connected). Initializing ClientSession...")
                 async with ClientSession(read, write) as session:
                     logger.info("MCP_SERVICE_LOOP: ClientSession created. Calling session.initialize()...")
                     await session.initialize() 
@@ -129,7 +132,7 @@ async def mcp_service_loop():
                         app_state.service_ready = False
 
                     if app_state.service_ready:
-                        while True: 
+                        while True: # Inner operational loop (runs if service is ready)
                             if not request_queue.empty():
                                 request_data = request_queue.get_nowait()
                                 if request_data["type"] == "search":
@@ -145,18 +148,20 @@ async def mcp_service_loop():
                                         response_queue.put({"id": request_id, "type": "search_result", "status": "error", "error": str(e_tool_call)})
                             await asyncio.sleep(0.1) 
         
-        except ConnectionRefusedError as e_conn_refused:
-            logger.error(f"MCP_SERVICE_LOOP: Connection refused. Is the server script ({MCP_SERVER_SCRIPT_ABS_PATH}) runnable? Error: {e_conn_refused}", exc_info=True) 
-        except asyncio.TimeoutError as e_timeout: 
-            logger.error(f"MCP_SERVICE_LOOP: Timeout in MCP service communication: {e_timeout}", exc_info=True)
-        except types.MCPError as e_mcp_protocol: 
-            logger.error(f"MCP_SERVICE_LOOP: MCP protocol error: {e_mcp_protocol}", exc_info=True)
-        except Exception as e_generic: 
-            logger.error(f"MCP_SERVICE_LOOP: Generic error in MCP service: {e_generic}", exc_info=True) 
+        except ConnectionRefusedError as e_conn_refused: # Should not happen with stdio
+            logger.error(f"MCP_SERVICE_LOOP: ConnectionRefusedError (unexpected for stdio): {e_conn_refused}", exc_info=True) 
+        except asyncio.TimeoutError as e_timeout: # Could happen during initialize or list_tools
+            logger.error(f"MCP_SERVICE_LOOP: TimeoutError in MCP service communication: {e_timeout}", exc_info=True)
+        except types.MCPError as e_mcp_protocol: # Specific MCP protocol errors
+            logger.error(f"MCP_SERVICE_LOOP: MCPError (protocol error): {e_mcp_protocol}", exc_info=True)
+        except Exception as e_generic: # Catch-all for other errors during stdio_client or ClientSession setup
+            logger.error(f"MCP_SERVICE_LOOP: Generic Exception during MCP service setup/connection: {e_generic}", exc_info=True) 
         finally:
+            # This block executes if the stdio_client or ClientSession context exits,
+            # or if an exception occurs in the try block above.
             app_state.service_ready = False 
             logger.info("MCP_SERVICE_LOOP: Connection lost or failed. Will attempt to reconnect after a 10s delay.")
-            await asyncio.sleep(10) 
+            await asyncio.sleep(10) # Wait before the outer while loop retries
 
 
 # --- FastAPI Lifespan Management ---
@@ -383,8 +388,6 @@ async def list_conversations():
         convs = []
         default_model = None
         for db_c in cursor:
-            # Efficiently get message count if not stored, or use a stored one if available
-            # For simplicity, this re-queries; optimize if performance becomes an issue
             msg_count = conversations_collection.count_documents({"_id": db_c["_id"], "messages.0": {"$exists": True}})
             item = {**db_c, "_id": str(db_c["_id"]), "message_count": msg_count}
             if not item.get("ollama_model_name"):
