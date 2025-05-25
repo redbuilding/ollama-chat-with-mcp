@@ -152,7 +152,7 @@ async def mcp_service_loop():
                                         logger.error(f"MCP_SERVICE_LOOP: Error in 'web_search' tool call: {e_tool_call}", exc_info=True)
                                         response_queue.put({"id": request_id, "type": "search_result", "status": "error", "error": str(e_tool_call)})
                             
-                            await asyncio.sleep(0.1) # Yield control, allow other tasks to run
+                            await asyncio.sleep(0.01) # Check queue more frequently
 
         except FileNotFoundError:
             logger.error(f"MCP_SERVICE_LOOP: '{MCP_SERVER_COMMAND[0]}' command not found. Please ensure FastMCP is installed and in PATH: pip install fastmcp", exc_info=True)
@@ -203,19 +203,25 @@ def submit_search_request(query: str) -> str:
     request_queue.put({"id": request_id, "type": "search", "query": query})
     return request_id
 
-def wait_for_response(request_id: str, timeout: int = 30) -> Dict:
+def wait_for_response(request_id: str, timeout: int = 45) -> Dict:  # Increased from 30 to 45
     start_time = time.time()
     while time.time() - start_time < timeout:
         try:
             items_in_queue, found_response = [], None
             while not response_queue.empty():
                 item = response_queue.get_nowait()
-                if item.get("id") == request_id: found_response = item; break
-                else: items_in_queue.append(item)
-            for item in items_in_queue: response_queue.put(item)
-            if found_response: return found_response
-        except queue.Empty: pass
-        time.sleep(0.5) # Reduced sleep from 0.5 to 0.1 for faster response, but 0.5 is fine.
+                if item.get("id") == request_id: 
+                    found_response = item
+                    break
+                else: 
+                    items_in_queue.append(item)
+            for item in items_in_queue: 
+                response_queue.put(item)
+            if found_response: 
+                return found_response
+        except queue.Empty: 
+            pass
+        time.sleep(0.1)  # Reduced from 0.5 for more responsiveness
     return {"id": request_id, "type": "search_result", "status": "error", "error": "Request timed out"}
 
 async def chat_with_ollama(messages: List[Dict[str, str]], model_name: str) -> Optional[str]:
@@ -229,23 +235,43 @@ async def chat_with_ollama(messages: List[Dict[str, str]], model_name: str) -> O
         logger.error(f"[Ollama] Error with model '{model_name}': {e}", exc_info=True)
         return None
 
-def extract_search_results(response_content): # response_content is now result.content from MCP
-    if isinstance(response_content, dict): 
-        return response_content # Expected path: MCP tool returns deserialized JSON (dict)
-    # The following branches might be less relevant if MCP tool behaves as expected
-    elif hasattr(response_content, 'text') and isinstance(response_content.text, str):
-        try: return json.loads(response_content.text)
-        except json.JSONDecodeError as e: logger.error(f"extract_search_results: JSONDecodeError from .text attribute: {e}. Content: {response_content.text[:200]}..."); return {"status": "error", "message": "Failed to parse search JSON from .text."}
-    elif isinstance(response_content, str): 
-        try: return json.loads(response_content)
-        except json.JSONDecodeError as e: logger.error(f"extract_search_results: JSONDecodeError from string: {e}. Content: {response_content[:200]}..."); return {"status": "error", "message": "Failed to parse search JSON string."}
+def extract_search_results(response_content):
+    """Extract and normalize search results from MCP response"""
+    # If it's already a dict, return it
+    if isinstance(response_content, dict):
+        return response_content
     
-    # If it's not a dict, or a string/object-with-text that can be parsed as JSON, log a warning.
-    # This could happen if the tool returns a simple string or number directly.
-    logger.warning(f"extract_search_results: Unhandled type or non-JSON content: {type(response_content)}. Content: {str(response_content)[:200]}..."); 
-    # Depending on requirements, you might want to wrap non-dict/non-JSON content or return an error.
-    # For now, returning an error if it's not a dict.
-    return {"status": "error", "message": f"Search result was not a recognized JSON structure. Type: {type(response_content)}"}
+    # If it's a list with one dict item (common MCP pattern)
+    elif isinstance(response_content, list) and len(response_content) == 1 and isinstance(response_content[0], dict):
+        return response_content[0]
+    
+    # If it's a list of results, wrap it
+    elif isinstance(response_content, list):
+        return {
+            "status": "success",
+            "organic_results": response_content,
+            "message": "Search results returned as list"
+        }
+    
+    # Handle text content with JSON
+    elif hasattr(response_content, 'text') and isinstance(response_content.text, str):
+        try:
+            return json.loads(response_content.text)
+        except json.JSONDecodeError as e:
+            logger.error(f"extract_search_results: JSONDecodeError from .text: {e}")
+            return {"status": "error", "message": "Failed to parse search JSON from .text."}
+    
+    # Handle string JSON
+    elif isinstance(response_content, str):
+        try:
+            return json.loads(response_content)
+        except json.JSONDecodeError as e:
+            logger.error(f"extract_search_results: JSONDecodeError from string: {e}")
+            return {"status": "error", "message": "Failed to parse search JSON string."}
+    
+    # Fallback
+    logger.warning(f"extract_search_results: Unhandled type: {type(response_content)}. Content: {str(response_content)[:200]}...")
+    return {"status": "error", "message": f"Search result was not a recognized format. Type: {type(response_content)}"}
 
 
 def format_search_results_for_prompt(results_data, query, max_results=3):

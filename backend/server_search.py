@@ -62,6 +62,7 @@ async def web_search(query: str) -> dict:
         A standardized dictionary containing search results or error information
     """
     if not query:
+        script_logger.warning("web_search called with empty query.")
         return {
             "status": "error",
             "message": "Missing required parameter 'query' for web_search tool.",
@@ -82,6 +83,7 @@ async def web_search(query: str) -> dict:
         search_results = response.json()
         script_logger.info(f"Search successful for: '{query}'")
 
+        # Return the structured dict
         return {
             "status": "success",
             "message": f"Search completed for: {query}",
@@ -92,15 +94,15 @@ async def web_search(query: str) -> dict:
         }
     except httpx.TimeoutException:
         script_logger.error(f"Timeout calling Serper.dev API for query '{query}'")
-        return {"status": "error", "message": f"Timeout: {query}", "results": []}
+        return {"status": "error", "message": f"Timeout performing search for: {query}", "results": []} # Updated message
     except httpx.HTTPStatusError as e:
         error_detail = e.response.text
         try:
             error_detail = e.response.json()
         except json.JSONDecodeError:
-            pass
-        script_logger.error(f"HTTP error for query '{query}': {e}. Response: {error_detail}")
-        return {"status": "error", "message": f"API Error: {error_detail}", "results": []}
+            pass # Keep error_detail as text if not JSON
+        script_logger.error(f"HTTP error for query '{query}': {e.response.status_code}. Response: {error_detail}")
+        return {"status": "error", "message": f"API Error ({e.response.status_code}): {error_detail}", "results": []} # Updated message
     except Exception as e:
         script_logger.exception(f"Unexpected error during web_search for query '{query}': {e}")
         return {"status": "error", "message": str(e), "results": []}
