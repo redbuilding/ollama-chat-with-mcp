@@ -42,7 +42,7 @@ MCP_SERVER_COMMAND = ["fastmcp", "run", MCP_SERVER_SCRIPT]
 
 os.makedirs('logs', exist_ok=True)
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler(f"logs/mcp_backend_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"),
@@ -50,7 +50,7 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger("mcp_backend")
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
 
 logger.info(f"MCP Client will launch FastMCP server using command: {' '.join(MCP_SERVER_COMMAND)} from directory: {_main_py_dir}")
 
@@ -157,7 +157,7 @@ async def mcp_service_loop():
                                 request_queue.task_done() # For asyncio.Queue if we were using await get()
                             except asyncio.QueueEmpty: # Specific exception for asyncio.Queue.get_nowait()
                                 pass # No item in queue, continue
-                            
+
                             await asyncio.sleep(0.01)
 
         except FileNotFoundError:
@@ -213,18 +213,18 @@ async def wait_for_response(request_id: str, timeout: int = 45) -> Dict: # Chang
             try:
                 item = await asyncio.wait_for(response_queue.get(), timeout=0.05)
                 if item.get("id") == request_id:
-                    response_queue.task_done() 
+                    response_queue.task_done()
                     return item
                 else:
-                    await response_queue.put(item) 
-            except asyncio.TimeoutError: 
-                pass 
-            except asyncio.QueueEmpty: 
+                    await response_queue.put(item)
+            except asyncio.TimeoutError:
                 pass
-            await asyncio.sleep(0.05) 
-    except Exception as e: 
+            except asyncio.QueueEmpty:
+                pass
+            await asyncio.sleep(0.05)
+    except Exception as e:
         logger.error(f"Error in wait_for_response for {request_id}: {e}", exc_info=True)
-    
+
     return {"id": request_id, "type": "search_result", "status": "error", "error": "Request timed out"}
 
 
@@ -245,7 +245,7 @@ def extract_search_results(response_content: Any) -> Dict:
     if isinstance(response_content, dict):
         logger.debug("extract_search_results: Input is dict, returning as-is.")
         return response_content
-    
+
     elif isinstance(response_content, list):
         logger.debug(f"extract_search_results: Input is list with {len(response_content)} items. First item type: {type(response_content[0]) if response_content else 'N/A'}")
         if len(response_content) == 1:
@@ -292,7 +292,7 @@ def extract_search_results(response_content: Any) -> Dict:
         except json.JSONDecodeError as e:
             logger.error(f"extract_search_results: JSONDecodeError parsing .text: {e}. Text was: {response_content.text[:200]}")
             return {"status": "error", "message": "Failed to parse search JSON from .text."}
-            
+
     elif isinstance(response_content, str):
         logger.debug("extract_search_results: Input is string, attempting JSON parse.")
         try:
@@ -300,7 +300,7 @@ def extract_search_results(response_content: Any) -> Dict:
         except json.JSONDecodeError as e:
             logger.error(f"extract_search_results: JSONDecodeError from string: {e}")
             return {"status": "error", "message": "Failed to parse search JSON string."}
-            
+
     else:
         logger.error(f"extract_search_results: Unhandled type: {type(response_content)}. Content: {str(response_content)[:200]}...")
         return {"status": "error", "message": f"Search result was not a recognized format. Type: {type(response_content)}"}
@@ -309,12 +309,12 @@ def extract_search_results(response_content: Any) -> Dict:
 def format_search_results_for_prompt(results_data, query, max_results=3):
     if not isinstance(results_data, dict) or results_data.get("status") == "error":
         return f"Search for '{query}': {results_data.get('message', 'Error or no valid results structure.')}"
-    
+
     # The server_search.py tool now returns a dict with "organic_results" key directly.
     organic = results_data.get('organic_results', [])
-    
+
     # This old check might not be needed if server_search.py is consistent
-    # if not organic and isinstance(results_data, list): 
+    # if not organic and isinstance(results_data, list):
     #     organic = results_data # This would imply results_data itself was the list of items
 
     if organic and isinstance(organic, list):
@@ -428,10 +428,10 @@ async def process_chat_request(payload: ChatPayload) -> ChatResponse:
         else:
             logger.info(f"[API_CHAT] Search active for: '{user_msg_content}'")
             try:
-                req_id = await submit_search_request(user_msg_content) 
+                req_id = await submit_search_request(user_msg_content)
                 logger.debug(f"[API_CHAT] Submitted search request with ID: {req_id}")
 
-                mcp_resp = await wait_for_response(req_id, timeout=90) 
+                mcp_resp = await wait_for_response(req_id, timeout=90)
                 logger.debug(f"[API_CHAT] Received MCP response: {mcp_resp}")
 
                 if mcp_resp.get("status") == "error" and mcp_resp.get("error") == "Request timed out": # Check for timeout specifically
@@ -453,7 +453,7 @@ async def process_chat_request(payload: ChatPayload) -> ChatResponse:
 
                 search_summary_text = format_search_results_for_prompt(extracted_results_data, user_msg_content)
                 logger.debug(f"[API_CHAT] Formatted search summary (first 200 chars): {search_summary_text[:200]}")
-                
+
                 if "Error or no valid results structure" in search_summary_text or \
                    "returned no specific organic results" in search_summary_text or \
                    "data in an unexpected format" in search_summary_text or \
