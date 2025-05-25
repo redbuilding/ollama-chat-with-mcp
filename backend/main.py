@@ -18,8 +18,8 @@ from bson import ObjectId
 from pymongo import MongoClient
 from pymongo.errors import ConnectionFailure, OperationFailure
 
-from mcp import ClientSession, types # Import types for MCPError
-from mcp.client.tcp import TCPClientTransport # Import TCP client transport
+import httpx # Added for MCP HTTP client
+
 import ollama 
 import time 
 import queue
@@ -33,8 +33,9 @@ import queue
 # Configuration for connecting to the separate MCP TCP server
 MCP_SERVER_HOST = "localhost"
 MCP_SERVER_PORT = 9000 # Must match the port server_search.py listens on
+MCP_SERVER_URL = f"http://{MCP_SERVER_HOST}:{MCP_SERVER_PORT}/mcp" # Added for HTTP MCP
 
-logging.info(f"MCP Client will attempt to connect to TCP server at {MCP_SERVER_HOST}:{MCP_SERVER_PORT}")
+logging.info(f"MCP Client will attempt to connect to MCP HTTP server at {MCP_SERVER_URL}")
 
 
 os.makedirs('logs', exist_ok=True)
@@ -89,72 +90,84 @@ app_state = AppState()
 
 # --- MCP Service ---
 async def mcp_service_loop():
-    logger.info("MCP_SERVICE_LOOP: Starting TCP client loop...")
+    logger.info("MCP_SERVICE_LOOP: Starting HTTP client loop...")
     
-    mcp_client_comms_logger = logger.getChild("mcp_client_comms")
-    mcp_client_comms_logger.setLevel(logging.DEBUG) 
-
     while True: 
         try:
-            transport = TCPClientTransport(
-                host=MCP_SERVER_HOST, 
-                port=MCP_SERVER_PORT, 
-                logger=mcp_client_comms_logger
-            )
-            logger.info(f"MCP_SERVICE_LOOP: Attempting to connect to MCP TCP server at {MCP_SERVER_HOST}:{MCP_SERVER_PORT}...")
-            
-            async with transport.connect() as (read, write): # transport.connect() is the async context manager
-                logger.info(f"MCP_SERVICE_LOOP: Successfully connected to MCP TCP server at {MCP_SERVER_HOST}:{MCP_SERVER_PORT}. Initializing ClientSession...")
-                async with ClientSession(read, write) as session:
-                    logger.info("MCP_SERVICE_LOOP: ClientSession created. Calling session.initialize()...")
-                    await session.initialize() 
-                    logger.info("MCP_SERVICE_LOOP: MCP session initialized successfully. Listing tools...")
-                    tools_response = await session.list_tools() 
-                    
-                    logger.debug(f"MCP_SERVICE_LOOP: Raw tools_response from MCP server: {tools_response!r}")
+            # Use HTTP client instead of TCP transport
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                logger.info(f"MCP_SERVICE_LOOP: Attempting to connect to MCP HTTP server at {MCP_SERVER_URL}...")
+                
+                # Initialize MCP session via HTTP
+                init_response = await client.post(f"{MCP_SERVER_URL}/initialize", json={
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "mcp-client", "version": "1.0.0"}
+                })
+                init_response.raise_for_status() # Raises HTTPStatusError for 4xx/5xx responses
+                
+                logger.info("MCP_SERVICE_LOOP: MCP session initialized successfully. Listing tools...")
+                
+                # List available tools
+                tools_list_response = await client.post(f"{MCP_SERVER_URL}/tools/list", json={})
+                tools_list_response.raise_for_status()
+                tools_data = tools_list_response.json()
+                
+                logger.debug(f"MCP_SERVICE_LOOP: Raw tools_response from MCP server: {tools_data}")
 
-                    if tools_response and tools_response.tools is not None:
-                        tool_names = [tool.name for tool in tools_response.tools]
-                        logger.info(f"MCP_SERVICE_LOOP: Available tools from MCP server: {tool_names}")
-                        if "web_search" not in tool_names: 
-                            logger.error(f"MCP_SERVICE_LOOP: CRITICAL: Required 'web_search' tool NOT FOUND among available tools: {tool_names}.")
-                            app_state.service_ready = False
-                        else:
-                            app_state.service_ready = True
-                            logger.info("MCP_SERVICE_LOOP: MCP service fully initialized and 'web_search' tool is available.")
-                    else:
-                        logger.error(f"MCP_SERVICE_LOOP: CRITICAL: No tools found or invalid/empty response from session.list_tools(). Response object: {tools_response!r}")
+                if tools_data and "tools" in tools_data and isinstance(tools_data["tools"], list):
+                    tool_names = [tool["name"] for tool in tools_data["tools"] if isinstance(tool, dict) and "name" in tool]
+                    logger.info(f"MCP_SERVICE_LOOP: Available tools from MCP server: {tool_names}")
+                    if "web_search" not in tool_names: 
+                        logger.error(f"MCP_SERVICE_LOOP: CRITICAL: Required 'web_search' tool NOT FOUND among available tools: {tool_names}.")
                         app_state.service_ready = False
+                    else:
+                        app_state.service_ready = True
+                        logger.info("MCP_SERVICE_LOOP: MCP service fully initialized and 'web_search' tool is available.")
+                else:
+                    logger.error(f"MCP_SERVICE_LOOP: CRITICAL: No tools found or invalid response format. Response: {tools_data}")
+                    app_state.service_ready = False
 
-                    if app_state.service_ready:
-                        while True: 
-                            if not request_queue.empty():
-                                request_data = request_queue.get_nowait()
-                                if request_data["type"] == "search":
-                                    query = request_data["query"]
-                                    request_id = request_data["id"]
-                                    try:
-                                        logger.debug(f"MCP_SERVICE_LOOP: Calling 'web_search' tool with query: {query}")
-                                        result = await session.call_tool("web_search", {"query": query})
-                                        logger.debug(f"MCP_SERVICE_LOOP: 'web_search' tool call successful. Result content type: {type(result.content)}")
-                                        response_queue.put({"id": request_id, "type": "search_result", "status": "success", "data": result.content})
-                                    except Exception as e_tool_call:
-                                        logger.error(f"MCP_SERVICE_LOOP: Error in 'web_search' tool call: {e_tool_call}", exc_info=True)
-                                        response_queue.put({"id": request_id, "type": "search_result", "status": "error", "error": str(e_tool_call)})
-                            await asyncio.sleep(0.1) 
+                if app_state.service_ready:
+                    while True: 
+                        if not request_queue.empty():
+                            request_data = request_queue.get_nowait()
+                            if request_data["type"] == "search":
+                                query = request_data["query"]
+                                request_id = request_data["id"]
+                                try:
+                                    logger.debug(f"MCP_SERVICE_LOOP: Calling 'web_search' tool with query: {query}")
+                                    
+                                    # Call tool via HTTP
+                                    tool_call_response = await client.post(f"{MCP_SERVER_URL}/tools/call", json={
+                                        "name": "web_search",
+                                        "arguments": {"query": query}
+                                    })
+                                    tool_call_response.raise_for_status()
+                                    result_data = tool_call_response.json()
+                                    
+                                    logger.debug(f"MCP_SERVICE_LOOP: 'web_search' tool call successful. Result type: {type(result_data)}")
+                                    response_queue.put({"id": request_id, "type": "search_result", "status": "success", "data": result_data})
+                                except httpx.HTTPStatusError as e_http_status:
+                                    logger.error(f"MCP_SERVICE_LOOP: HTTP error in 'web_search' tool call: {e_http_status.response.status_code} - {e_http_status.response.text}", exc_info=True)
+                                    response_queue.put({"id": request_id, "type": "search_result", "status": "error", "error": f"HTTP Error: {e_http_status.response.status_code}"})
+                                except Exception as e_tool_call:
+                                    logger.error(f"MCP_SERVICE_LOOP: Error in 'web_search' tool call: {e_tool_call}", exc_info=True)
+                                    response_queue.put({"id": request_id, "type": "search_result", "status": "error", "error": str(e_tool_call)})
+                        await asyncio.sleep(0.1) 
         
-        except ConnectionRefusedError as e_conn_refused: 
-            logger.error(f"MCP_SERVICE_LOOP: ConnectionRefusedError connecting to {MCP_SERVER_HOST}:{MCP_SERVER_PORT}. Is the MCP server running? Error: {e_conn_refused}", exc_info=True) 
-        except asyncio.TimeoutError as e_timeout: 
-            logger.error(f"MCP_SERVICE_LOOP: TimeoutError in MCP service communication with {MCP_SERVER_HOST}:{MCP_SERVER_PORT}: {e_timeout}", exc_info=True)
-        except types.MCPError as e_mcp_protocol: 
-            logger.error(f"MCP_SERVICE_LOOP: MCPError (protocol error) with {MCP_SERVER_HOST}:{MCP_SERVER_PORT}: {e_mcp_protocol}", exc_info=True)
+        except httpx.ConnectError as e_conn: 
+            logger.error(f"MCP_SERVICE_LOOP: Connection error to {MCP_SERVER_URL}. Is the MCP server running? Error: {e_conn}")
+        except httpx.TimeoutException as e_timeout: 
+            logger.error(f"MCP_SERVICE_LOOP: Timeout error communicating with {MCP_SERVER_URL}: {e_timeout}")
+        except httpx.HTTPStatusError as e_http_init_status: # Catch HTTP errors during init/list_tools
+             logger.error(f"MCP_SERVICE_LOOP: HTTP error during session setup with {MCP_SERVER_URL}: {e_http_init_status.response.status_code} - {e_http_init_status.response.text}", exc_info=True)
         except Exception as e_generic: 
-            logger.error(f"MCP_SERVICE_LOOP: Generic Exception during MCP service connection/operation with {MCP_SERVER_HOST}:{MCP_SERVER_PORT}: {e_generic}", exc_info=True) 
+            logger.error(f"MCP_SERVICE_LOOP: Generic Exception during MCP service communication with {MCP_SERVER_URL}: {e_generic}", exc_info=True) 
         finally:
             app_state.service_ready = False 
-            logger.info(f"MCP_SERVICE_LOOP: Connection to {MCP_SERVER_HOST}:{MCP_SERVER_PORT} lost or failed. Will attempt to reconnect after a 10s delay.")
-            await asyncio.sleep(10) 
+            logger.info(f"MCP_SERVICE_LOOP: Connection to {MCP_SERVER_URL} lost or failed. Will attempt to reconnect after a 10s delay.")
+            await asyncio.sleep(10)
 
 
 # --- FastAPI Lifespan Management ---
@@ -230,10 +243,21 @@ def extract_search_results(response_content):
 def format_search_results_for_prompt(results_data, query, max_results=3):
     if not isinstance(results_data, dict) or results_data.get("status") == "error":
         return f"Search for '{query}': {results_data.get('message', 'Error or no results.')}"
+    
+    # Assuming the HTTP MCP server returns a structure compatible with Serper.dev API
+    # e.g., {"organic_results": [...]} or similar.
+    # If the structure is different, this part needs adjustment.
+    # For example, if the result is directly the list of items:
+    # organic = results_data if isinstance(results_data, list) else results_data.get('organic_results', [])
+
     organic = results_data.get('organic_results', []) 
+    if not organic and isinstance(results_data, list): # Fallback if data is directly a list of results
+        organic = results_data
+
     if organic:
         return f"Web search results for '{query}':\n" + "\n".join(f"{i+1}. {item.get('title', 'N/A')}\n   {item.get('snippet', 'N/A')}\n   Source: {item.get('link', 'N/A')}" for i, item in enumerate(organic[:max_results]))
-    return f"Search for '{query}' returned no specific organic results."
+    return f"Search for '{query}' returned no specific organic results. Data: {str(results_data)[:200]}"
+
 
 class ChatMessage(BaseModel):
     role: str; content: str; is_html: Optional[bool] = False; timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -313,7 +337,10 @@ async def process_chat_request(payload: ChatPayload) -> ChatResponse:
                 req_id = submit_search_request(user_msg_content)
                 mcp_resp = wait_for_response(req_id)
                 if mcp_resp.get("status") == "error": raise Exception(mcp_resp.get("error", "MCP search error"))
+                
+                # mcp_resp["data"] is now expected to be a dict (parsed JSON from HTTP response)
                 extracted = extract_search_results(mcp_resp.get("data")) 
+                
                 if extracted.get("status") == "error": raise Exception(extracted.get("message", "Search extraction error."))
                 search_txt = format_search_results_for_prompt(extracted, user_msg_content)
                 search_html_indicator = f"<div class='search-indicator-custom'><b>🔍 Web Search:</b> Results for \"{user_msg_content}\" used.</div>"
