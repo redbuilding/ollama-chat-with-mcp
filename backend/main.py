@@ -385,7 +385,7 @@ async def chat_endpoint(payload: ChatPayload):
 async def get_status():
     return {"service_ready": app_state.service_ready, "ollama_model": "qwen2.5:14b", "db_connected": conversations_collection is not None}
 
-@app.get("/api/conversations", response_model=List[ConversationListItem])
+@app.get("/api/conversations", response_model=List[ConversationListItem], response_model_by_alias=False)
 async def list_conversations():
     if conversations_collection is None:
         raise HTTPException(status_code=503, detail="MongoDB service not available.")
@@ -407,12 +407,12 @@ async def list_conversations():
             # We explicitly convert ObjectId to string for the '_id' key in the input dict.
             item_data_for_validation = dict(conv_data_from_db) # Create a mutable copy
             if "_id" in item_data_for_validation and isinstance(item_data_for_validation["_id"], ObjectId):
+                # This step ensures that the input to model_validate has '_id' as a string,
+                # which Pydantic will then use to populate the 'id' field due to the alias.
                 item_data_for_validation["_id"] = str(item_data_for_validation["_id"])
             
             item_data_for_validation["message_count"] = message_count
             
-            # Pydantic will use the alias "_id" for "id" field upon validation.
-            # Default for 'title' will be applied by Pydantic if not present.
             conversation_list.append(ConversationListItem.model_validate(item_data_for_validation))
         return conversation_list
     except Exception as e:
