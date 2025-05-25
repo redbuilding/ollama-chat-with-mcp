@@ -96,18 +96,19 @@ async def mcp_service_loop():
     mcp_client_comms_logger = logger.getChild("mcp_client_comms")
     mcp_client_comms_logger.setLevel(logging.DEBUG) # Ensure this logger captures DEBUG from MCP client library
 
+    server_script_dir = os.path.dirname(MCP_SERVER_SCRIPT_ABS_PATH) # Get directory of server_search.py
+
     while True: 
         try:
-            # Experiment: Use "python" as command, similar to old chat_client.py
-            # Keep absolute path for the script argument for clarity.
+            logger.info(f"MCP_SERVICE_LOOP: Setting CWD for subprocess to: {server_script_dir}")
             server_params_for_client = StdioServerParameters(
-                command="python", # Changed from sys.executable
-                args=[MCP_SERVER_SCRIPT_ABS_PATH], 
-                env=None 
+                command="python", 
+                args=[MCP_SERVER_SCRIPT_ABS_PATH], # Using absolute path for the script itself
+                env=None,
+                cwd=server_script_dir # Explicitly set CWD to the script's directory
             )
-            logger.info(f"MCP_SERVICE_LOOP: Attempting to start MCP server using stdio_client with: command='python', args=['{MCP_SERVER_SCRIPT_ABS_PATH}']")
+            logger.info(f"MCP_SERVICE_LOOP: Attempting to start MCP server using stdio_client with: command='python', args=['{MCP_SERVER_SCRIPT_ABS_PATH}'], cwd='{server_script_dir}'")
             
-            # The stdio_client's logger should capture stderr from server_search.py
             async with stdio_client(server_params_for_client, logger=mcp_client_comms_logger) as (read, write):
                 logger.info("MCP_SERVICE_LOOP: stdio_client context entered (implies subprocess started and pipes connected). Initializing ClientSession...")
                 async with ClientSession(read, write) as session:
@@ -132,7 +133,7 @@ async def mcp_service_loop():
                         app_state.service_ready = False
 
                     if app_state.service_ready:
-                        while True: # Inner operational loop (runs if service is ready)
+                        while True: 
                             if not request_queue.empty():
                                 request_data = request_queue.get_nowait()
                                 if request_data["type"] == "search":
@@ -148,20 +149,18 @@ async def mcp_service_loop():
                                         response_queue.put({"id": request_id, "type": "search_result", "status": "error", "error": str(e_tool_call)})
                             await asyncio.sleep(0.1) 
         
-        except ConnectionRefusedError as e_conn_refused: # Should not happen with stdio
+        except ConnectionRefusedError as e_conn_refused: 
             logger.error(f"MCP_SERVICE_LOOP: ConnectionRefusedError (unexpected for stdio): {e_conn_refused}", exc_info=True) 
-        except asyncio.TimeoutError as e_timeout: # Could happen during initialize or list_tools
+        except asyncio.TimeoutError as e_timeout: 
             logger.error(f"MCP_SERVICE_LOOP: TimeoutError in MCP service communication: {e_timeout}", exc_info=True)
-        except types.MCPError as e_mcp_protocol: # Specific MCP protocol errors
+        except types.MCPError as e_mcp_protocol: 
             logger.error(f"MCP_SERVICE_LOOP: MCPError (protocol error): {e_mcp_protocol}", exc_info=True)
-        except Exception as e_generic: # Catch-all for other errors during stdio_client or ClientSession setup
+        except Exception as e_generic: 
             logger.error(f"MCP_SERVICE_LOOP: Generic Exception during MCP service setup/connection: {e_generic}", exc_info=True) 
         finally:
-            # This block executes if the stdio_client or ClientSession context exits,
-            # or if an exception occurs in the try block above.
             app_state.service_ready = False 
             logger.info("MCP_SERVICE_LOOP: Connection lost or failed. Will attempt to reconnect after a 10s delay.")
-            await asyncio.sleep(10) # Wait before the outer while loop retries
+            await asyncio.sleep(10) 
 
 
 # --- FastAPI Lifespan Management ---
