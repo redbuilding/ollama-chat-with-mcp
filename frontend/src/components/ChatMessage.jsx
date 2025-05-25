@@ -41,24 +41,37 @@ const ChatMessage = ({ message }) => {
   const [copied, copy] = useCopyToClipboard();
 
   // Extract text content for copying, stripping HTML if necessary
-  const getTextContentForCopy = (htmlContent) => {
-    if (!htmlContent) return '';
-    if (is_html) {
+  const getTextContentForCopy = (htmlOrTextContent) => {
+    if (!htmlOrTextContent) return '';
+    if (is_html) { // Check if the message itself is marked as HTML
       const tempDiv = document.createElement('div');
-      tempDiv.innerHTML = htmlContent;
-      // A common pattern is an indicator div then the actual message.
-      // Try to get text from all child nodes.
+      tempDiv.innerHTML = htmlOrTextContent; // The content might already include indicators + actual message
+      
+      // Attempt to remove known indicator divs before extracting text
+      // This is a bit fragile and depends on the structure of indicators
+      const indicators = tempDiv.querySelectorAll('.search-indicator-custom, .db-indicator-custom');
+      indicators.forEach(indicator => {
+        // Add a newline or space if removing the indicator might merge text awkwardly
+        // For now, just remove. Text content extraction should handle spacing.
+        indicator.remove();
+      });
+
+      // Extract text from the remaining content
       let text = "";
-      tempDiv.childNodes.forEach(node => {
+      // If there are still child nodes, iterate through them. Otherwise, use textContent of tempDiv.
+      const nodesToProcess = tempDiv.childNodes.length > 0 ? tempDiv.childNodes : [tempDiv];
+
+      nodesToProcess.forEach(node => {
         if (node.textContent) {
-          text += node.textContent + "\n";
+          text += node.textContent.trim() + "\n"; // Trim each part and add newline
         }
       });
-      return text.trim();
+      return text.trim(); // Final trim
     }
-    return htmlContent;
+    // If not HTML, or if it's plain text after parsing, return as is
+    return htmlOrTextContent;
   };
-
+  
   const contentToCopy = getTextContentForCopy(content);
   const messageParts = is_html ? [] : parseMessageContent(content);
 
@@ -80,15 +93,17 @@ const ChatMessage = ({ message }) => {
         </div>
 
         {is_html ? (
-          <div className="prose prose-sm prose-invert max-w-none" dangerouslySetInnerHTML={{ __html: content }} />
+          // Ensure prose styles apply correctly to the indicators and the main content
+          <div className="prose prose-sm prose-invert max-w-none [&>div:first-child]:mb-2" dangerouslySetInnerHTML={{ __html: content }} />
         ) : (
           messageParts.map((part, index) =>
             part.type === 'code' ? (
               <CodeBlock key={index} language={part.language} code={part.code} />
             ) : (
-              <p key={index} className="whitespace-pre-wrap text-sm leading-relaxed">
+              // Using <pre> for text parts to preserve whitespace and newlines from typical LLM text responses
+              <pre key={index} className="whitespace-pre-wrap text-sm leading-relaxed font-sans p-0 bg-transparent border-none my-0">
                 {part.content}
-              </p>
+              </pre>
             )
           )
         )}

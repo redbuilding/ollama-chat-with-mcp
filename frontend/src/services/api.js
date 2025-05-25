@@ -9,20 +9,20 @@ const apiClient = axios.create({
   },
 });
 
-export const sendMessage = async (userMessage, chatHistory, useSearch, conversationId = null, ollamaModelName = null) => {
+export const sendMessage = async (userMessage, chatHistory, useSearch, useDatabase, conversationId = null, ollamaModelName = null) => {
   try {
     const payload = {
       user_message: userMessage,
-      chat_history: chatHistory, // Current UI history, backend might load canonical from DB
+      chat_history: chatHistory,
       use_search: useSearch,
+      use_database: useDatabase, // New flag
       conversation_id: conversationId,
     };
-    if (ollamaModelName && !conversationId) { // Only send model for new chats
+    if (ollamaModelName && !conversationId) {
       payload.ollama_model_name = ollamaModelName;
     }
     const response = await apiClient.post("/chat", payload);
-    // Response should now be { conversation_id: "...", chat_history: [...], ollama_model_name: "..." }
-    return response.data; 
+    return response.data;
   } catch (error) {
     console.error(
       "Error sending message:",
@@ -37,7 +37,14 @@ export const sendMessage = async (userMessage, chatHistory, useSearch, conversat
 export const getServiceStatus = async () => {
   try {
     const response = await apiClient.get("/status");
-    // Expected: { service_ready: bool, db_connected: bool, ollama_available: bool }
+    // Expected: { 
+    //   db_connected: bool, 
+    //   ollama_available: bool,
+    //   mcp_services: { 
+    //     web_search_service: { ready: bool }, 
+    //     mysql_db_service: { ready: bool } 
+    //   } 
+    // }
     return response.data;
   } catch (error) {
     console.error(
@@ -53,15 +60,12 @@ export const getServiceStatus = async () => {
 export const getOllamaModels = async () => {
   try {
     const response = await apiClient.get("/ollama-models");
-    // Expected: ["model1:latest", "model2:latest", ...]
     return response.data;
   } catch (error) {
     console.error(
       "Error fetching Ollama models:",
       error.response ? error.response.data : error.message,
     );
-    // Return an empty array or rethrow specific error type if needed by UI
-    // For now, rethrowing to be handled by the caller
     throw error.response
       ? error.response.data
       : new Error("Network error or server unavailable fetching Ollama models");
@@ -71,7 +75,6 @@ export const getOllamaModels = async () => {
 export const getConversations = async () => {
   try {
     const response = await apiClient.get("/conversations");
-    // Expected: [{ id: "...", title: "...", created_at: "...", updated_at: "...", message_count: 0, ollama_model_name: "..." }, ...]
     return response.data;
   } catch (error) {
     console.error(
@@ -87,9 +90,6 @@ export const getConversations = async () => {
 export const getConversationMessages = async (conversationId) => {
   try {
     const response = await apiClient.get(`/conversations/${conversationId}`);
-    // Expected: [{ role: "...", content: "...", is_html: false, timestamp: "..." }, ...]
-    // This endpoint currently does not return the model name for the conversation,
-    // it's assumed to be known from the conversation list or the chat response.
     return response.data;
   } catch (error) {
     console.error(
@@ -105,7 +105,7 @@ export const getConversationMessages = async (conversationId) => {
 export const deleteConversation = async (conversationId) => {
   try {
     const response = await apiClient.delete(`/conversations/${conversationId}`);
-    return response.data; // Typically 204 No Content, so data might be undefined or empty
+    return response.data; 
   } catch (error) {
     console.error(
       `Error deleting conversation ${conversationId}:`,
@@ -120,7 +120,7 @@ export const deleteConversation = async (conversationId) => {
 export const renameConversation = async (conversationId, newTitle) => {
   try {
     const response = await apiClient.put(`/conversations/${conversationId}/rename`, { new_title: newTitle });
-    return response.data; // Expected: updated ConversationListItem
+    return response.data; 
   } catch (error) {
     console.error(
       `Error renaming conversation ${conversationId}:`,
