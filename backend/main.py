@@ -18,7 +18,7 @@ from pymongo.errors import ConnectionFailure
 
 from mcp import ClientSession, StdioServerParameters, types
 from mcp.client.stdio import stdio_client
-import ollama
+import ollama # Ensure ollama is imported
 import threading
 import time
 import queue
@@ -254,9 +254,9 @@ async def get_default_ollama_model() -> str:
             if non_embedding_models:
                 return non_embedding_models[0]
             return models_info['models'][0]['name']
-        logger.warning("No Ollama models found via API. Falling back to default.")
+        logger.warning("No Ollama models found via API when determining default. Falling back to hardcoded default.")
     except Exception as e:
-        logger.warning(f"Could not fetch Ollama models list to determine default: {e}. Falling back to hardcoded default.")
+        logger.warning(f"Could not fetch Ollama models list to determine default: {e}. Falling back to hardcoded default: {DEFAULT_OLLAMA_MODEL}")
     return DEFAULT_OLLAMA_MODEL
 
 
@@ -291,7 +291,7 @@ async def process_chat_request(payload: ChatPayload) -> ChatResponse:
             model_for_conversation = payload.ollama_model_name
         else:
             model_for_conversation = await get_default_ollama_model()
-            logger.info(f"No model specified in payload or conversation, using default: {model_for_conversation}")
+            logger.info(f"No model specified in payload or conversation, using determined default: {model_for_conversation}")
     
     if not conversation_id: # New chat
         new_conv_doc = {
@@ -354,8 +354,6 @@ async def process_chat_request(payload: ChatPayload) -> ChatResponse:
             )
         except Exception as e:
             logger.error(f"[MCP] Search error: {e}", exc_info=True)
-            # This transient error message is not saved to DB here, but sent to UI.
-            # It will appear before the LLM's attempt to answer from its own knowledge.
             error_msg_obj = ChatMessage(role="assistant", content=f"⚠️ Search failed for '{query}'. I'll answer from my knowledge.")
             ui_messages_for_response.append(error_msg_obj)
 
@@ -397,7 +395,6 @@ async def process_chat_request(payload: ChatPayload) -> ChatResponse:
         err_msg_content = f"Sorry, I couldn't generate a response using model {model_for_conversation}."
         error_chat_message = ChatMessage(role="assistant", content=err_msg_content)
         ui_messages_for_response.append(error_chat_message)
-        # This assistant error is not saved to DB here.
 
     return ChatResponse(conversation_id=conversation_id, chat_history=ui_messages_for_response, ollama_model_name=model_for_conversation)
 
@@ -414,18 +411,17 @@ async def chat_endpoint(payload: ChatPayload):
 
 @app.get("/api/status")
 async def get_status():
-    # Ollama model is now dynamic per conversation, so not reported globally here.
-    # We can add a check for ollama server connectivity if desired.
     ollama_available = False
     try:
-        await asyncio.to_thread(ollama.list) # Simple check to see if ollama server is responsive
+        await asyncio.to_thread(ollama.list) 
         ollama_available = True
     except Exception:
         ollama_available = False
-        logger.warning("Ollama server not responding to list command for status check.")
+        # This warning is fine, as status check is non-critical for this specific error.
+        # logger.warning("Ollama server not responding to list command for status check.")
 
     return {
-        "service_ready": app_state.service_ready, # MCP search service
+        "service_ready": app_state.service_ready, 
         "db_connected": conversations_collection is not None,
         "ollama_available": ollama_available
     }
@@ -433,21 +429,45 @@ async def get_status():
 @app.get("/api/ollama-models", response_model=List[str])
 async def list_ollama_models():
     try:
+        logger.info("Attempting to fetch Ollama models list from Ollama server...")
         models_info = await asyncio.to_thread(ollama.list)
-        if models_info and 'models' in models_info:
-            # Filter out potential embedding models from user selection if desired, or return all
-            # For now, returning all non-empty names
-            model_names = [model['name'] for model in models_info['models'] if model.get('name')]
-            if not model_names: # If all names were empty or no models
-                 raise HTTPException(status_code=404, detail="No Ollama models found or all models have empty names.")
+        logger.debug(f"Raw response from ollama.list: {models_info}")
+
+        if models_info and 'models' in models_info and isinstance(models_info['models'], list):
+            model_names = [model['name'] for model in models_info['models'] if isinstance(model, dict) and model.get('name')]
+            if not model_names:
+                 logger.warning("No Ollama models found in the response, or all models have empty/missing names.")
+                 # Return empty list instead of 404, as Ollama might just have no models installed.
+                 # Frontend can then message "No models available"
+                 return [] 
+            logger.info(f"Successfully fetched and parsed model names: {model_names}")
             return model_names
-        raise HTTPException(status_code=404, detail="No Ollama models found or unexpected format from Ollama API.")
-    except ollama.ResponseError as e:
-        logger.error(f"Ollama API response error when fetching models: {e.status_code} - {e.error}", exc_info=True)
+        
+        logger.warning(f"Unexpected format from Ollama API or 'models' key missing/not a list. Response: {models_info}")
+        raise HTTPException(status_code=500, detail="Unexpected format received from Ollama server when listing models.")
+
+    except ollama.ResponseError as e: 
+        logger.error(f"Ollama API response error when fetching models: Status {e.status_code} - {e.error}", exc_info=True)
         raise HTTPException(status_code=e.status_code if e.status_code else 500, detail=f"Ollama API error: {e.error}")
-    except Exception as e:
-        logger.error(f"Error fetching Ollama models: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to fetch Ollama models from Ollama server.")
+    
+    except ollama.RequestError as e: # Handles connection errors, timeouts, etc.
+        ollama_host_env = os.getenv('OLLAMA_HOST')
+        # Determine the host ollama client likely tried. Default is http://localhost:11434
+        # The ollama client has its own logic for parsing OLLAMA_HOST.
+        # This is an approximation for the error message.
+        actual_host_tried = "http://localhost:11434" 
+        if ollama_host_env:
+            if not ollama_host_env.startswith(('http://', 'https://')):
+                actual_host_tried = f"http://{ollama_host_env}" 
+            else:
+                actual_host_tried = ollama_host_env
+        
+        logger.error(f"Failed to connect to Ollama server (tried approximately: {actual_host_tried}, based on OLLAMA_HOST='{ollama_host_env}'). Error: {e}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Could not connect to Ollama server (tried {actual_host_tried}). Please ensure it's running and accessible. Check OLLAMA_HOST environment variable if it's not on default.")
+
+    except Exception as e: 
+        logger.error(f"An unexpected error occurred while fetching Ollama models: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An unexpected internal server error occurred while fetching Ollama models.")
 
 
 @app.get("/api/conversations", response_model=List[ConversationListItem], response_model_by_alias=False)
@@ -455,13 +475,13 @@ async def list_conversations():
     if conversations_collection is None:
         raise HTTPException(status_code=503, detail="MongoDB service not available.")
     try:
-        # Projection now explicitly includes ollama_model_name, messages are excluded
         convs_cursor = conversations_collection.find(
             {}, {"messages": 0} 
         ).sort("updated_at", -1).limit(50) 
         
         conversation_list = []
-        default_model_for_list = await get_default_ollama_model()
+        # Fetch default model once, to avoid repeated calls if many old records need it.
+        _default_model_for_list = None 
 
         for conv_data_from_db in convs_cursor:
             full_conv_doc = conversations_collection.find_one({"_id": conv_data_from_db["_id"]}, {"messages": 1})
@@ -472,9 +492,11 @@ async def list_conversations():
                 item_data_for_validation["_id"] = str(item_data_for_validation["_id"])
             
             item_data_for_validation["message_count"] = message_count
-            # Ensure ollama_model_name is present, defaulting if necessary (e.g., for older records)
+            
             if "ollama_model_name" not in item_data_for_validation or not item_data_for_validation["ollama_model_name"]:
-                item_data_for_validation["ollama_model_name"] = default_model_for_list
+                if _default_model_for_list is None: # Fetch only if needed and not already fetched
+                    _default_model_for_list = await get_default_ollama_model()
+                item_data_for_validation["ollama_model_name"] = _default_model_for_list
             
             conversation_list.append(ConversationListItem.model_validate(item_data_for_validation))
         return conversation_list
@@ -527,6 +549,7 @@ if __name__ == "__main__":
         if mongo_client:
             mongo_client.close()
             logger.info("MongoDB connection closed.")
+        # Potentially add cleanup for MCP service thread if needed, though daemon=True helps.
         sys.exit(0)
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
