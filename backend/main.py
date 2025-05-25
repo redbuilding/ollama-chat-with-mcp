@@ -25,13 +25,18 @@ import queue
 
 # --- Environment Setup ---
 MCP_SERVER_SCRIPT = "server_search.py"
-if not os.path.exists(MCP_SERVER_SCRIPT):
-    if os.path.exists(os.path.join("..", MCP_SERVER_SCRIPT)):
-        MCP_SERVER_SCRIPT = os.path.join("..", MCP_SERVER_SCRIPT)
-    elif not os.path.exists(os.path.join(os.path.dirname(__file__), MCP_SERVER_SCRIPT)):
-        logging.error(f"MCP server script '{MCP_SERVER_SCRIPT}' not found.")
-    else:
-        MCP_SERVER_SCRIPT = os.path.join(os.path.dirname(__file__), MCP_SERVER_SCRIPT)
+# Determine the absolute path to MCP_SERVER_SCRIPT relative to this file's directory
+# This makes it more robust regardless of where main.py is executed from.
+_main_py_dir = os.path.dirname(os.path.abspath(__file__))
+MCP_SERVER_SCRIPT_ABS_PATH = os.path.join(_main_py_dir, MCP_SERVER_SCRIPT)
+
+if not os.path.exists(MCP_SERVER_SCRIPT_ABS_PATH):
+    logging.error(f"MCP server script '{MCP_SERVER_SCRIPT_ABS_PATH}' not found. Searched in directory: '{_main_py_dir}'.")
+    # Potentially exit or disable MCP features if critical
+    # For now, it will likely fail in mcp_service_loop and log there.
+else:
+    logging.info(f"MCP server script found at: {MCP_SERVER_SCRIPT_ABS_PATH}")
+
 
 os.makedirs('logs', exist_ok=True)
 # BasicConfig sets the root logger. We'll set the specific logger level later.
@@ -102,22 +107,93 @@ def run_mcp_service():
 
 async def mcp_service_loop():
     logger.info("Starting MCP service loop")
+    if not os.path.exists(MCP_SERVER_SCRIPT_ABS_PATH):
+        logger.error(f"MCP service cannot start: script '{MCP_SERVER_SCRIPT_ABS_PATH}' not found.")
+        app_state.service_ready = False
+        return
+
     try:
+        # Pass the directory of server_search.py as CWD for the subprocess
+        # This helps server_search.py find its .env file reliably if it's in the same directory
+        server_script_dir = os.path.dirname(MCP_SERVER_SCRIPT_ABS_PATH)
+        
         server_params = StdioServerParameters(
-            command=sys.executable, args=[MCP_SERVER_SCRIPT], env=None
+            command=sys.executable, 
+            args=[MCP_SERVER_SCRIPT_ABS_PATH], 
+            env=None, # Inherits current environment
+            # cwd=server_script_dir # StdioServerParameters doesn't have cwd, set via create_subprocess_exec
         )
-        logger.info(f"Attempting to start MCP server with: {sys.executable} {MCP_SERVER_SCRIPT}")
-        async with stdio_client(server_params) as (read, write):
+        logger.info(f"Attempting to start MCP server with: {sys.executable} {MCP_SERVER_SCRIPT_ABS_PATH} in CWD: {server_script_dir}")
+        
+        # Customizing subprocess creation to set CWD
+        # Based on mcp.client.stdio.stdio_client internal structure
+        proc = await asyncio.create_subprocess_exec(
+            server_params.command,
+            *server_params.args,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE, # Capture stderr for better debugging
+            env=server_params.env,
+            cwd=server_script_dir # Explicitly set CWD for the subprocess
+        )
+
+        # Log stderr from MCP server for debugging
+        async def log_stderr():
+            while proc.stderr and not proc.stderr.at_eof():
+                line = await proc.stderr.readline()
+                if line:
+                    logger.info(f"[MCP Server STDERR] {line.decode().strip()}")
+                else:
+                    break
+            logger.info("MCP Server STDERR stream ended.")
+
+        stderr_task = asyncio.create_task(log_stderr())
+
+        # Proceed with stdio_client logic, but using the manually created process
+        # This is a bit of a workaround as stdio_client itself doesn't expose CWD for the subprocess easily
+        # A cleaner way would be if StdioServerParameters supported CWD.
+        # For now, we adapt. The key is ClientSession needs read/write streams.
+        
+        # The original stdio_client context manager handles proc.wait() and cleanup.
+        # We need to replicate parts or use it carefully.
+        # Let's try to use the existing stdio_client but ensure it uses our proc if possible,
+        # or accept that CWD setting needs a custom loop.
+        # Given StdioServerParameters doesn't support CWD, we'll stick to its default behavior
+        # and rely on server_search.py's load_dotenv searching upwards.
+        # The print() fix in server_search.py is the primary one.
+        # The MCP_SERVER_SCRIPT_ABS_PATH ensures we run the correct script.
+
+        # Reverting to standard stdio_client call, the absolute path and print fix are main.
+        server_params_for_client = StdioServerParameters(
+            command=sys.executable,
+            args=[MCP_SERVER_SCRIPT_ABS_PATH], # Use absolute path
+            env=None 
+        )
+
+        async with stdio_client(server_params_for_client, logger=logger.getChild("mcp_client")) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
+                logger.info("MCP session initialized. Listing tools...")
                 tools_response = await session.list_tools()
-                if not any(tool.name == "web_search" for tool in tools_response.tools):
-                    logger.error("Error: Required 'web_search' tool not found.")
+                
+                if tools_response and tools_response.tools is not None: # Check tools is not None
+                    tool_names = [tool.name for tool in tools_response.tools]
+                    logger.info(f"Available tools from MCP server: {tool_names}")
+                    if not any(tool.name == "web_search" for tool in tools_response.tools):
+                        logger.error(f"Error: Required 'web_search' tool not found among available tools: {tool_names}.")
+                        app_state.service_ready = False
+                        # stderr_task.cancel() # If we had the custom proc
+                        return
+                else:
+                    logger.error(f"Error: No tools found or invalid/empty response from session.list_tools(). Response: {tools_response}")
                     app_state.service_ready = False
+                    # stderr_task.cancel() # If we had the custom proc
                     return
+                
                 app_state.service_ready = True
-                logger.info("MCP service initialized and ready")
-                while True:
+                logger.info("MCP service initialized and ready with 'web_search' tool.")
+                
+                while True: # Main operational loop
                     try:
                         if not request_queue.empty():
                             request_data = request_queue.get_nowait()
@@ -125,19 +201,39 @@ async def mcp_service_loop():
                                 query = request_data["query"]
                                 request_id = request_data["id"]
                                 try:
+                                    logger.debug(f"Calling 'web_search' tool with query: {query}")
                                     result = await session.call_tool("web_search", {"query": query})
+                                    logger.debug(f"'web_search' tool call successful. Result content type: {type(result.content)}")
                                     response_queue.put({"id": request_id, "type": "search_result", "status": "success", "data": result.content})
                                 except Exception as e:
-                                    logger.error(f"Error in search tool call: {e}")
+                                    logger.error(f"Error in 'web_search' tool call: {e}", exc_info=True)
                                     response_queue.put({"id": request_id, "type": "search_result", "status": "error", "error": str(e)})
+                        # Check if subprocess is still running
+                        if proc.returncode is not None: # proc might not be defined here if using original stdio_client
+                             logger.warning(f"MCP server subprocess exited with code {proc.returncode}. Stopping MCP service loop.")
+                             break # Exit while loop
                     except queue.Empty:
                         pass
+                    except Exception as e: # Catch errors within the while loop
+                        logger.error(f"Exception in MCP service operational loop: {e}", exc_info=True)
+                        # Decide if to break or continue
                     await asyncio.sleep(0.1)
+    except ConnectionRefusedError as e:
+        logger.error(f"MCP service connection refused. Is the server script ({MCP_SERVER_SCRIPT_ABS_PATH}) runnable and not crashing immediately? Error: {e}", exc_info=True)
+    except asyncio.TimeoutError as e:
+        logger.error(f"Timeout in MCP service communication (e.g., during initialize or list_tools): {e}", exc_info=True)
     except Exception as e:
-        logger.error(f"Error in MCP service: {e}", exc_info=True)
+        logger.error(f"Generic error in MCP service setup or during connection: {e}", exc_info=True)
     finally:
         app_state.service_ready = False
-        logger.info("MCP service stopped")
+        logger.info("MCP service stopped or failed to start.")
+        # if 'stderr_task' in locals() and not stderr_task.done():
+        #    stderr_task.cancel()
+        #    try:
+        #        await stderr_task
+        #    except asyncio.CancelledError:
+        #        logger.info("MCP Server STDERR logging task cancelled.")
+
 
 # --- Utility Functions for MCP Interaction ---
 def submit_search_request(query: str) -> str:
@@ -176,27 +272,41 @@ async def chat_with_ollama(messages: List[Dict[str, str]], model_name: str) -> O
 
 # --- Search Result Processing ---
 def extract_search_results(response_content):
-    # Simplified extraction logic
-    if hasattr(response_content, 'text'): # MCP TextContent
-        try: return json.loads(response_content.text)
-        except json.JSONDecodeError: return response_content.text
-    if isinstance(response_content, list) and len(response_content) > 0 and hasattr(response_content[0], 'text'):
-        try: return json.loads(response_content[0].text)
-        except json.JSONDecodeError: return response_content[0].text
-    if isinstance(response_content, dict): return response_content
-    return response_content
-
-
-def format_search_results_for_prompt(results, query, max_results=3):
-    if isinstance(results, str):
-        try: results = json.loads(results)
-        except json.JSONDecodeError: return f"Web search for '{query}':\n{results[:1000]}..."
+    # MCP TextContent has a 'text' attribute.
+    # The web_search tool in server_search.py returns a dict.
+    # If result.content is already a dict, use it directly.
+    # If it's TextContent containing JSON string, parse it.
     
-    organic_results = []
-    if isinstance(results, dict):
-        organic_results = results.get('organic', []) or results.get('organic_results', [])
-    elif isinstance(results, list) and results and isinstance(results[0], dict):
-        organic_results = results
+    if isinstance(response_content, dict):
+        logger.debug("extract_search_results: received dict, using directly.")
+        return response_content
+    elif hasattr(response_content, 'text') and isinstance(response_content.text, str):
+        logger.debug("extract_search_results: received TextContent, attempting to parse JSON from its 'text' attribute.")
+        try:
+            return json.loads(response_content.text)
+        except json.JSONDecodeError as e:
+            logger.error(f"extract_search_results: JSONDecodeError parsing TextContent: {e}. Content: {response_content.text[:500]}")
+            return {"status": "error", "message": "Failed to parse search result JSON from TextContent."}
+    elif isinstance(response_content, str): # Fallback if it's just a string (should ideally be JSON string)
+        logger.debug("extract_search_results: received plain string, attempting to parse as JSON.")
+        try:
+            return json.loads(response_content)
+        except json.JSONDecodeError as e:
+            logger.error(f"extract_search_results: JSONDecodeError parsing plain string: {e}. Content: {response_content[:500]}")
+            return {"status": "error", "message": "Failed to parse search result JSON from string."}
+    
+    logger.warning(f"extract_search_results: Unhandled response_content type: {type(response_content)}. Content: {str(response_content)[:500]}")
+    return {"status": "error", "message": f"Unhandled search result type: {type(response_content)}"}
+
+
+def format_search_results_for_prompt(results_data, query, max_results=3):
+    # results_data is now expected to be the dictionary returned by web_search or parsed by extract_search_results
+    if not isinstance(results_data, dict) or results_data.get("status") == "error":
+        error_message = results_data.get("message", "Search returned no recognizable results or an error.")
+        logger.warning(f"format_search_results_for_prompt: Invalid or error in results_data for query '{query}'. Message: {error_message}")
+        return f"Search for '{query}': {error_message}"
+
+    organic_results = results_data.get('organic_results', []) # server_search.py returns 'organic_results'
 
     if organic_results:
         formatted = "\n".join(
@@ -204,7 +314,9 @@ def format_search_results_for_prompt(results, query, max_results=3):
             for i, item in enumerate(organic_results[:max_results])
         )
         return f"Web search results for '{query}':\n{formatted}"
-    return f"Search for '{query}' returned no recognizable organic results or an error."
+    
+    logger.info(f"Search for '{query}' returned no organic_results. Full results_data: {results_data}")
+    return f"Search for '{query}' returned no specific organic results. (May include other categories like top stories or Q&A if available in raw data)."
 
 
 # --- FastAPI Application ---
@@ -365,27 +477,65 @@ async def process_chat_request(payload: ChatPayload) -> ChatResponse:
     prompt_for_llm = user_message_content
     search_performed_indicator_html = None
 
-    if payload.use_search and app_state.service_ready:
-        query = user_message_content 
-        logger.info(f"[MCP] Search active. Querying for: '{query}' with model {model_for_conversation}")
-        try:
-            request_id = submit_search_request(query)
-            response = wait_for_response(request_id)
-            if response["status"] == "error": raise Exception(response.get("error", "Unknown search error"))
-            
-            extracted_results = extract_search_results(response["data"])
-            search_results_text = format_search_results_for_prompt(extracted_results, query)
-            
-            search_performed_indicator_html = f"<div class='search-indicator-custom'><b>🔍 Web Search:</b> Results for \"{query}\" used.</div>"
-            
-            prompt_for_llm = (
-                f"Today's date is {app_state.formatted_date}. Search results for '{query}':\n{search_results_text}\n\n"
-                f"Using these search results, answer: '{query}'"
-            )
-        except Exception as e:
-            logger.error(f"[MCP] Search error: {e}", exc_info=True)
-            error_msg_obj = ChatMessage(role="assistant", content=f"⚠️ Search failed for '{query}'. I'll answer from my knowledge.")
+    if payload.use_search:
+        if not app_state.service_ready:
+            logger.warning("[MCP] Search requested but MCP service is not ready. Skipping search.")
+            error_msg_obj = ChatMessage(role="assistant", content="⚠️ Web search is currently unavailable. I'll answer from my knowledge.")
             ui_messages_for_response.append(error_msg_obj)
+            # We still need to save the user message before this assistant warning
+            if conv_object_id:
+                 user_message_to_save_dict_no_search = user_chat_message.model_dump(exclude_none=True)
+                 user_message_to_save_dict_no_search["raw_content_for_llm"] = prompt_for_llm # Original prompt
+                 conversations_collection.update_one(
+                    {"_id": conv_object_id},
+                    {"$push": {"messages": {"$each" : [
+                        user_message_to_save_dict_no_search,
+                        error_msg_obj.model_dump(exclude_none=True)
+                    ]}}, 
+                    "$set": {"updated_at": datetime.now(timezone.utc)}}
+                )
+            # Fall through to LLM without search results
+        else: # MCP service is ready
+            query = user_message_content 
+            logger.info(f"[MCP] Search active. Querying for: '{query}' with model {model_for_conversation}")
+            try:
+                request_id = submit_search_request(query)
+                response_data_mcp = wait_for_response(request_id) # This is already a dict
+                
+                if response_data_mcp.get("status") == "error":
+                    raise Exception(response_data_mcp.get("error", "Unknown search error from MCP response"))
+                
+                # extract_search_results expects the raw content from MCP, which is response_data_mcp["data"]
+                # server_search.py already returns a dict, so response_data_mcp["data"] should be that dict.
+                extracted_results = extract_search_results(response_data_mcp.get("data")) 
+                
+                if extracted_results.get("status") == "error": # Check status from extracted_results
+                    raise Exception(extracted_results.get("message", "Search result extraction indicated an error."))
+
+                search_results_text = format_search_results_for_prompt(extracted_results, query)
+                
+                search_performed_indicator_html = f"<div class='search-indicator-custom'><b>🔍 Web Search:</b> Results for \"{query}\" used.</div>"
+                
+                prompt_for_llm = (
+                    f"Today's date is {app_state.formatted_date}. Search results for '{query}':\n{search_results_text}\n\n"
+                    f"Using these search results, answer: '{query}'"
+                )
+            except Exception as e:
+                logger.error(f"[MCP] Search processing error: {e}", exc_info=True)
+                error_msg_obj = ChatMessage(role="assistant", content=f"⚠️ Search failed for '{query}'. I'll answer from my knowledge. Error: {str(e)[:100]}")
+                ui_messages_for_response.append(error_msg_obj)
+                # Save user message and this assistant error if search fails mid-way
+                if conv_object_id:
+                    user_message_to_save_dict_search_fail = user_chat_message.model_dump(exclude_none=True)
+                    user_message_to_save_dict_search_fail["raw_content_for_llm"] = query # Original query as LLM prompt
+                    conversations_collection.update_one(
+                        {"_id": conv_object_id},
+                        {"$push": {"messages": {"$each" : [
+                            user_message_to_save_dict_search_fail,
+                            error_msg_obj.model_dump(exclude_none=True)
+                        ]}}, 
+                        "$set": {"updated_at": datetime.now(timezone.utc)}}
+                    )
 
 
     llm_conversation_history.append({"role": "user", "content": prompt_for_llm})
@@ -393,11 +543,30 @@ async def process_chat_request(payload: ChatPayload) -> ChatResponse:
     user_message_to_save_dict = user_chat_message.model_dump(exclude_none=True)
     user_message_to_save_dict["raw_content_for_llm"] = prompt_for_llm 
 
-    if conv_object_id:
-        conversations_collection.update_one(
-            {"_id": conv_object_id},
-            {"$push": {"messages": user_message_to_save_dict}, "$set": {"updated_at": datetime.now(timezone.utc)}}
-        )
+    # Save user message only if it wasn't saved during a search failure/skip path
+    # Check if the last message in ui_messages_for_response is the user's current message
+    # This logic is getting complex; simplify by saving user message once before LLM call if not already part of a specific error flow.
+    # For now, assume it's pushed to DB *before* LLM call if not handled by specific error paths above.
+    # The current structure pushes user message to DB *before* this block if search is involved and fails.
+    # If search is not used, or succeeds, it's pushed here.
+    
+    # Let's ensure user message is saved if not already handled by an error path that added an assistant message
+    last_ui_message_is_user = ui_messages_for_response and ui_messages_for_response[-1].role == "user"
+    
+    if conv_object_id and last_ui_message_is_user : # Only save if not already handled by error path that added an assistant msg
+        # Check if this exact user message (by content and role) is already the last in DB.
+        # This is to prevent double saving if an error path already saved it.
+        # This check is imperfect. A more robust way is needed if flows get more complex.
+        # For now, we assume if an error message was added to ui_messages_for_response, user message was handled.
+        
+        # Simpler: only update if the user message is the last one added to ui_messages_for_response
+        # (meaning no intermediate assistant error message was added after it)
+        if len(ui_messages_for_response) > 0 and ui_messages_for_response[-1].content == user_chat_message.content:
+             conversations_collection.update_one(
+                {"_id": conv_object_id},
+                {"$push": {"messages": user_message_to_save_dict}, "$set": {"updated_at": datetime.now(timezone.utc)}}
+            )
+
 
     model_response_content = await chat_with_ollama(llm_conversation_history, model_name=model_for_conversation)
 
@@ -406,7 +575,7 @@ async def process_chat_request(payload: ChatPayload) -> ChatResponse:
         
         assistant_response_for_ui = model_response_content
         is_html = False
-        if search_performed_indicator_html:
+        if search_performed_indicator_html: # Only add indicator if search was successful
             assistant_response_for_ui = f"{search_performed_indicator_html}\n\n{model_response_content}"
             is_html = True
         
@@ -414,7 +583,7 @@ async def process_chat_request(payload: ChatPayload) -> ChatResponse:
         ui_messages_for_response.append(assistant_chat_message)
 
         assistant_message_to_save_dict = assistant_chat_message.model_dump(exclude_none=True)
-        assistant_message_to_save_dict["raw_content_for_llm"] = model_response_content
+        assistant_message_to_save_dict["raw_content_for_llm"] = model_response_content # Save raw LLM response
 
         if conv_object_id:
             conversations_collection.update_one(
@@ -425,6 +594,13 @@ async def process_chat_request(payload: ChatPayload) -> ChatResponse:
         err_msg_content = f"Sorry, I couldn't generate a response using model {model_for_conversation}."
         error_chat_message = ChatMessage(role="assistant", content=err_msg_content)
         ui_messages_for_response.append(error_chat_message)
+        if conv_object_id: # Save this error response
+            conversations_collection.update_one(
+                {"_id": conv_object_id},
+                {"$push": {"messages": error_chat_message.model_dump(exclude_none=True)}, 
+                 "$set": {"updated_at": datetime.now(timezone.utc)}}
+            )
+
 
     return ChatResponse(conversation_id=conversation_id, chat_history=ui_messages_for_response, ollama_model_name=model_for_conversation)
 
@@ -648,7 +824,9 @@ def main_backend():
     service_thread = threading.Thread(target=run_mcp_service, daemon=True)
     service_thread.start()
     logger.info("MCP service thread started")
-    time.sleep(2) 
+    # It might take a moment for the service_ready flag to be set.
+    # The frontend will poll /api/status.
+    # time.sleep(2) # Removed fixed sleep, status polling is better
     logger.info(f"FastAPI backend setup complete. Default Ollama model: {DEFAULT_OLLAMA_MODEL}. Run with: uvicorn backend.main:app --reload --port 8000")
 
 if __name__ == "__main__":
@@ -657,6 +835,7 @@ if __name__ == "__main__":
         if mongo_client:
             mongo_client.close()
             logger.info("MongoDB connection closed.")
+        # Potentially add cleanup for service_thread if needed, though daemon=True helps.
         sys.exit(0)
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
