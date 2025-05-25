@@ -6,6 +6,7 @@ import httpx
 from mcp.server.fastmcp import FastMCP
 import logging
 import sys
+import time
 
 # Get a logger for this module specifically for setup and script-level messages
 script_logger = logging.getLogger("server_search_script")
@@ -77,12 +78,15 @@ async def web_search(query: str) -> dict:
 
     try:
         script_logger.info(f"Performing search for: '{query}'")
+        start_time = time.time()
         async with httpx.AsyncClient(timeout=20) as client:
             response = await client.post(SERPER_API_URL, headers=headers, data=payload)
+        end_time = time.time()
+        script_logger.info(f"Serper API call took {end_time - start_time:.2f} seconds")
         response.raise_for_status()
         search_results = response.json() # This is already a dict
         script_logger.info(f"Search successful for: '{query}'")
-        
+
         # Log the actual results for debugging
         # Use INFO level for this potentially large log, or DEBUG if preferred for less noise
         script_logger.debug(f"Serper API response: {json.dumps(search_results, indent=2)}")
@@ -97,7 +101,7 @@ async def web_search(query: str) -> dict:
             "people_also_ask": search_results.get("peopleAlsoAsk", [])
             # You can include other parts of search_results if needed
         }
-        
+
         script_logger.debug(f"Returning result: {json.dumps(result, indent=2)}")
         return result # Ensure this is a dict
 
@@ -109,7 +113,7 @@ async def web_search(query: str) -> dict:
         try:
             error_detail = e.response.json()
         except json.JSONDecodeError:
-            pass 
+            pass
         script_logger.error(f"HTTP error for query '{query}': {e.response.status_code}. Response: {error_detail}")
         return {"status": "error", "message": f"API Error ({e.response.status_code}): {error_detail}", "results": []}
     except Exception as e:
