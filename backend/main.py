@@ -250,31 +250,40 @@ class ConversationListItem(BaseModel):
 async def get_default_ollama_model() -> str:
     try:
         logger.debug("Attempting to fetch Ollama models list for default model selection...")
-        models_info = await asyncio.to_thread(ollama.list)
-        logger.debug(f"Ollama models_info for default model: {models_info}")
+        # ollama.list() returns a ModelsResponse object
+        models_response = await asyncio.to_thread(ollama.list)
+        logger.debug(f"Ollama models_response for default model: {models_response}")
 
-        if models_info and isinstance(models_info.get('models'), list) and models_info['models']:
+        if models_response and hasattr(models_response, 'models') and isinstance(models_response.models, list) and models_response.models:
+            # models_response.models is a list of Model objects
+            actual_models_list = models_response.models
+            
             valid_models_with_names = [
-                m for m in models_info['models'] 
-                if isinstance(m, dict) and m.get('name')
+                m for m in actual_models_list
+                if hasattr(m, 'name') and m.name # m.name is the model tag e.g. "llama2:latest"
             ]
 
             if not valid_models_with_names:
                 logger.warning("No models with valid names found in Ollama response for default model selection.")
             else:
-                non_embedding_models = [
-                    m['name'] for m in valid_models_with_names
-                    if 'embed' not in m.get('family', '').lower() and \
-                       'embed' not in m.get('name', '').lower() # m.get('name') is already confirmed truthy here
-                ]
+                non_embedding_models = []
+                for m in valid_models_with_names:
+                    model_family = ""
+                    if m.details and hasattr(m.details, 'family') and m.details.family:
+                        model_family = m.details.family.lower()
+                    
+                    model_name_lower = m.name.lower()
+                    if 'embed' not in model_family and 'embed' not in model_name_lower:
+                        non_embedding_models.append(m.name)
+
                 if non_embedding_models:
                     logger.debug(f"Found non-embedding models for default: {non_embedding_models}, selecting {non_embedding_models[0]}")
                     return non_embedding_models[0]
                 
-                logger.info(f"No non-embedding models found, falling back to the first available model with a name: {valid_models_with_names[0]['name']}")
-                return valid_models_with_names[0]['name']
+                logger.info(f"No non-embedding models found, falling back to the first available model with a name: {valid_models_with_names[0].name}")
+                return valid_models_with_names[0].name
         
-        logger.warning("No Ollama models found or 'models' key is not a non-empty list in API response when determining default. Falling back to hardcoded default.")
+        logger.warning("No Ollama models found or 'models' attribute is not a non-empty list in API response when determining default. Falling back to hardcoded default.")
     except Exception as e:
         logger.warning(f"Could not fetch or parse Ollama models list to determine default: {e}. Falling back to hardcoded default: {DEFAULT_OLLAMA_MODEL}", exc_info=True)
     return DEFAULT_OLLAMA_MODEL
@@ -450,14 +459,16 @@ async def get_status():
 async def list_ollama_models():
     try:
         logger.info("Attempting to fetch Ollama models list from Ollama server...")
-        models_info = await asyncio.to_thread(ollama.list)
-        # Using logger.debug for potentially large output, ensure logger level is DEBUG
-        logger.debug(f"Ollama models_info content: {models_info}")
+        # ollama.list() returns a ModelsResponse object
+        models_response = await asyncio.to_thread(ollama.list)
+        logger.debug(f"Ollama models_response content: {models_response}")
 
-
-        if models_info and 'models' in models_info and isinstance(models_info['models'], list):
-            # Filter for models that are dicts and have a truthy 'name'
-            model_names = [model['name'] for model in models_info['models'] if isinstance(model, dict) and model.get('name')]
+        if models_response and hasattr(models_response, 'models') and isinstance(models_response.models, list):
+            # models_response.models is a list of Model objects
+            actual_models_list = models_response.models
+            
+            # Filter for models that have a truthy 'name' attribute
+            model_names = [model.name for model in actual_models_list if hasattr(model, 'name') and model.name]
             
             if not model_names:
                  logger.warning("No Ollama models with valid names found in the response.")
@@ -465,7 +476,7 @@ async def list_ollama_models():
             logger.info(f"Successfully fetched and parsed model names: {model_names}")
             return model_names
         
-        logger.warning(f"Unexpected format from Ollama API or 'models' key missing/not a list. Response: {models_info}")
+        logger.warning(f"Unexpected format from Ollama API or 'models' attribute missing/not a list. Response: {models_response}")
         raise HTTPException(status_code=500, detail="Unexpected format received from Ollama server when listing models.")
 
     except ollama.ResponseError as e: 
