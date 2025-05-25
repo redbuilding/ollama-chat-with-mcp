@@ -60,9 +60,7 @@ if not os.path.exists(MCP_SERVER_SCRIPT):
 
     elif not os.path.exists(os.path.join(os.path.dirname(__file__), MCP_SERVER_SCRIPT)):
 
-        logging.error(f"MCP server script '{MCP_SERVER_SCRIPT}' not found in current directory or parent.
-Please ensure it's correctly placed.")
-
+        logging.error(f"MCP server script '{MCP_SERVER_SCRIPT}' not found in current directory or parent.")
         # For robustness, you might want to exit or handle this more gracefully
 
         # For now, we'll let it proceed and potentially fail at MCP client init
@@ -129,8 +127,7 @@ class AppState:
 
     def formatted_date(self):
 
-        return f"{self.current_date.strftime('%B')} {self.current_date.strftime('%d').lstrip('0')},
-{self.current_date.strftime('%Y')}"
+        return f"{self.current_date.strftime('%B')} {self.current_date.strftime('%d').lstrip('0')}, {self.current_date.strftime('%Y')}"
 
 
 
@@ -442,8 +439,7 @@ def format_search_results_for_prompt(results, query, max_results=3):
 
             formatted = "\n".join(
 
-                f"{i+1}. {item.get('title', 'N/A')}\n   {item.get('snippet', 'N/A')}\n   Source:
-{item.get('link', 'N/A')}"
+                f"{i+1}. {item.get('title', 'N/A')}\n   {item.get('snippet', 'N/A')}\n   Source: {item.get('link', 'N/A')}"
 
                 for i, item in enumerate(organic_results[:max_results])
 
@@ -455,8 +451,7 @@ def format_search_results_for_prompt(results, query, max_results=3):
 
         formatted = "\n".join(
 
-            f"{i+1}. {item.get('title', 'N/A')}\n   {item.get('snippet', 'N/A')}\n   Source: {item.get('link',
-'N/A')}"
+            f"{i+1}. {item.get('title', 'N/A')}\n   {item.get('snippet', 'N/A')}\n   Source: {item.get('link', 'N/A')}"
 
             for i, item in enumerate(results[:max_results])
 
@@ -562,8 +557,7 @@ async def process_chat_request(payload: Dict) -> List[Dict[str, str]]:
 
             # Add a message to UI history about service not ready
 
-            current_ui_history.append({"role": "assistant", "content": "Search service is not available. I'll
-answer based on my training data only."})
+            current_ui_history.append({"role": "assistant", "content": "Search service is not available. I'll answer based on my training data only."})
 
             # LLM will get the original user_message
 
@@ -599,16 +593,13 @@ answer based on my training data only."})
 
                 prompt_for_llm = (
 
-                    f"Today's date is {app_state.formatted_date}. Here are CURRENT search results from
-{app_state.month_year} about '{query}':\n\n"
+                    f"Today's date is {app_state.formatted_date}. Here are CURRENT search results from {app_state.month_year} about '{query}':\n\n"
 
                     f"{search_results_text}\n\n"
 
-                    f"Using these UP-TO-DATE search results, provide a comprehensive answer to the implicit or
-explicit question in '{query}'.\n\n"
+                    f"Using these UP-TO-DATE search results, provide a comprehensive answer to the implicit or explicit question in '{query}'.\n\n"
 
-                    f"Note: These search results ARE CURRENT as of {app_state.month_year} and contain real
-information about events in {app_state.year}."
+                    f"Note: These search results ARE CURRENT as of {app_state.month_year} and contain real information about events in {app_state.year}."
 
                 )
 
@@ -622,13 +613,11 @@ information about events in {app_state.year}."
 
                 logger.exception("Detailed search error:")
 
-                current_ui_history.append({"role": "assistant", "content": f"❌ Search failed for '{query}'.
-I'll try to answer without web data."})
+                current_ui_history.append({"role": "assistant", "content": f"❌ Search failed for '{query}'. I'll try to answer without web data."})
 
                 # Fallback: LLM gets original user_message, but we can prepend a note about failed search
 
-                prompt_for_llm = f"Search was attempted for '{query}' but it failed. Please answer based on
-your training data: {user_message}"
+                prompt_for_llm = f"Search was attempted for '{query}' but it failed. Please answer based on your training data: {user_message}"
 
 
 
@@ -662,13 +651,11 @@ your training data: {user_message}"
 
             # Ensure your frontend CSS handles 'search-indicator-custom'
 
-            indicator_html = f"<div class='search-indicator-custom'><b>🔍 Web Search Tool:</b> Results for
-\"{search_performed_info['query']}\" were used.</div>"
+            indicator_html = f"<div class='search-indicator-custom'><b>🔍 Web Search Tool:</b> Results for \"{search_performed_info['query']}\" were used.</div>"
 
             assistant_response_for_ui = f"{indicator_html}\n\n{model_response_content}"
 
-            current_ui_history.append({"role": "assistant", "content": assistant_response_for_ui, "is_html":
-True})
+            current_ui_history.append({"role": "assistant", "content": assistant_response_for_ui, "is_html": True})
 
         else:
 
@@ -686,8 +673,7 @@ True})
 
         # Add a placeholder to LLM history so it knows an attempt was made
 
-        app_state.llm_conversation_history.append({"role": "assistant", "content": "[Error: No response
-generated]"})
+        app_state.llm_conversation_history.append({"role": "assistant", "content": "[Error: No response generated]"})
 
 
 
@@ -759,8 +745,7 @@ if os.path.exists(frontend_dist_path):
 
 else:
 
-    logger.warning(f"Frontend build directory not found at {frontend_dist_path}. Static file serving will be
-disabled. This is normal for development if frontend is on a separate server.")
+    logger.warning(f"Frontend build directory not found at {frontend_dist_path}. Static file serving will be disabled. This is normal for development if frontend is on a separate server.")
 
 
 
