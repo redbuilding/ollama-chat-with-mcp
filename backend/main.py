@@ -7,14 +7,14 @@ import signal
 import sys
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, Tuple
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response, status
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from pydantic import BaseModel, Field
 from bson import ObjectId
 from pymongo import MongoClient
-from pymongo.errors import ConnectionFailure
+from pymongo.errors import ConnectionFailure, OperationFailure
 
 from mcp import ClientSession, StdioServerParameters, types
 from mcp.client.stdio import stdio_client
@@ -550,6 +550,34 @@ async def get_conversation_messages(conversation_id: str):
     except Exception as e:
         logger.error(f"Error fetching conversation {conversation_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Error fetching conversation details.")
+
+@app.delete("/api/conversations/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_conversation(conversation_id: str):
+    if conversations_collection is None:
+        logger.error(f"Attempt to delete conversation {conversation_id} when MongoDB is not available.")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="MongoDB service not available.")
+    
+    if not ObjectId.is_valid(conversation_id):
+        logger.warning(f"Invalid ObjectId format for deletion: {conversation_id}")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid conversation_id format.")
+    
+    try:
+        obj_id = ObjectId(conversation_id)
+        delete_result = conversations_collection.delete_one({"_id": obj_id})
+        
+        if delete_result.deleted_count == 0:
+            logger.warning(f"Conversation with ID {conversation_id} not found for deletion.")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found.")
+        
+        logger.info(f"Successfully deleted conversation with ID: {conversation_id}")
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+        
+    except OperationFailure as e:
+        logger.error(f"MongoDB operation failure while deleting conversation {conversation_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Database operation failed during deletion.")
+    except Exception as e:
+        logger.error(f"Unexpected error while deleting conversation {conversation_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="An unexpected error occurred during deletion.")
 
 
 # Serve static files

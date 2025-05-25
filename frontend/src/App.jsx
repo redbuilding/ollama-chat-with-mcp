@@ -7,7 +7,8 @@ import {
   getServiceStatus, 
   getConversations, 
   getConversationMessages,
-  getOllamaModels
+  getOllamaModels,
+  deleteConversation // Import new API function
 } from './services/api';
 import { AlertTriangle, Wifi, Server, Database, Loader2, BrainCircuit } from 'lucide-react';
 
@@ -240,6 +241,22 @@ const App = () => {
     }
   };
 
+  const handleDeleteConversation = async (conversationIdToDelete) => {
+    setError(null);
+    try {
+      await deleteConversation(conversationIdToDelete);
+      setConversations(prevConvs => prevConvs.filter(conv => conv.id !== conversationIdToDelete));
+      if (currentConversationId === conversationIdToDelete) {
+        handleNewChat(); // Reset to new chat state if current one is deleted
+      }
+    } catch (err) {
+      const errorMessage = err.detail || err.message || 'Failed to delete conversation.';
+      setError(errorMessage); // Display error to user
+      // Optionally, re-fetch conversations if delete failed to ensure UI consistency
+      // fetchConversationsList(); 
+    }
+  };
+
   const toggleSearch = () => {
     setIsSearchActive(prev => !prev);
   };
@@ -258,6 +275,7 @@ const App = () => {
         currentConversationId={currentConversationId}
         onSelectConversation={handleSelectConversation}
         onNewChat={handleNewChat}
+        onDeleteConversation={handleDeleteConversation} // Pass down the new handler
         isLoading={isConversationsLoading}
         dbConnected={dbConnected}
         conversationsError={conversationsError} 

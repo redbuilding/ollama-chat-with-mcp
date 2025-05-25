@@ -1,12 +1,13 @@
 import React from 'react';
-import { PlusSquare, MessageSquare, Loader2, AlertTriangle } from 'lucide-react';
+import { PlusSquare, MessageSquare, Loader2, AlertTriangle, Trash2 } from 'lucide-react';
 
 const ConversationSidebar = ({
   conversations,
   currentConversationId,
   onSelectConversation,
   onNewChat,
-  isLoading, // This is isConversationsLoading from App.jsx
+  onDeleteConversation, // New prop
+  isLoading,
   dbConnected,
   conversationsError,
 }) => {
@@ -16,6 +17,13 @@ const ConversationSidebar = ({
       month: 'short',
       day: 'numeric',
     });
+  };
+
+  const handleDeleteClick = (e, conversationId) => {
+    e.stopPropagation(); // Prevent selection when clicking delete
+    if (window.confirm('Are you sure you want to delete this conversation? This action cannot be undone.')) {
+      onDeleteConversation(conversationId);
+    }
   };
 
   return (
@@ -57,26 +65,35 @@ const ConversationSidebar = ({
             }) 
             .map((conv) => {
               return (
-                <button
-                  key={conv.id} 
-                  onClick={() => onSelectConversation(conv.id)}
-                  className={`w-full flex items-start text-left p-2 rounded-md text-sm transition-colors duration-150 focus:outline-none
-                    ${
-                      currentConversationId === conv.id
-                        ? 'bg-brand-blue text-white'
-                        : 'text-brand-text-secondary hover:bg-gray-700 hover:text-brand-text-primary'
-                    }`}
-                >
-                  <MessageSquare size={16} className="mr-2 mt-0.5 flex-shrink-0" />
-                  <div className="flex-grow overflow-hidden">
-                    <p className="truncate font-medium">
-                      {conv.title || `Chat from ${formatDate(conv.created_at)}`}
-                    </p>
-                    <p className={`text-xs truncate ${currentConversationId === conv.id ? 'text-blue-200' : 'text-gray-500'}`}>
-                      {conv.message_count} messages - {formatDate(conv.updated_at)}
-                    </p>
-                  </div>
-                </button>
+                <div key={conv.id} className="relative group">
+                  <button
+                    onClick={() => onSelectConversation(conv.id)}
+                    className={`w-full flex items-start text-left p-2 rounded-md text-sm transition-colors duration-150 focus:outline-none
+                      ${
+                        currentConversationId === conv.id
+                          ? 'bg-brand-blue text-white'
+                          : 'text-brand-text-secondary hover:bg-gray-700 hover:text-brand-text-primary'
+                      }`}
+                  >
+                    <MessageSquare size={16} className="mr-2 mt-0.5 flex-shrink-0" />
+                    <div className="flex-grow overflow-hidden">
+                      <p className="truncate font-medium">
+                        {conv.title || `Chat from ${formatDate(conv.created_at)}`}
+                      </p>
+                      <p className={`text-xs truncate ${currentConversationId === conv.id ? 'text-blue-200' : 'text-gray-500'}`}>
+                        {conv.message_count} messages - {formatDate(conv.updated_at)}
+                      </p>
+                    </div>
+                  </button>
+                  <button
+                    onClick={(e) => handleDeleteClick(e, conv.id)}
+                    className="absolute top-1/2 right-1 transform -translate-y-1/2 p-1.5 rounded-md text-brand-text-secondary hover:text-brand-alert-red hover:bg-gray-600 opacity-0 group-hover:opacity-100 focus:opacity-100 transition-all duration-150 z-10"
+                    title="Delete chat"
+                    aria-label="Delete chat"
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </div>
               );
             })}
       </div>

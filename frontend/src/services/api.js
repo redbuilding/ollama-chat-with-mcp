@@ -101,3 +101,18 @@ export const getConversationMessages = async (conversationId) => {
       : new Error("Network error or server unavailable");
   }
 };
+
+export const deleteConversation = async (conversationId) => {
+  try {
+    const response = await apiClient.delete(`/conversations/${conversationId}`);
+    return response.data; // Typically 204 No Content, so data might be undefined or empty
+  } catch (error) {
+    console.error(
+      `Error deleting conversation ${conversationId}:`,
+      error.response ? error.response.data : error.message,
+    );
+    throw error.response
+      ? error.response.data
+      : new Error("Network error or server unavailable");
+  }
+};
