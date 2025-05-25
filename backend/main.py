@@ -24,6 +24,7 @@ import subprocess
 from mcp import ClientSession
 # from mcp.client.stdio import stdio_client # Old (v0.4.1 / MCP 1.6.0 style)
 from fastmcp.client.transports import StdioServerParameters, stdio_client # New (v2.x)
+# from mcp.common.content import TextContent # Could import for isinstance, or use duck typing
 
 
 import ollama
@@ -147,6 +148,7 @@ async def mcp_service_loop():
                                         result = await session.call_tool("web_search", {"query": query})
                                         end_time_tool_call = time.time()
                                         logger.info(f"MCP_SERVICE_LOOP: 'web_search' completed in {end_time_tool_call - start_time_tool_call:.2f} seconds")
+                                        # result.content is List[ContentPart]. For web_search, it's List[TextContent]
                                         logger.debug(f"MCP_SERVICE_LOOP: 'web_search' tool call successful. Result content type: {type(result.content)}. Content: {str(result.content)[:500]}") # Log content preview
                                         await response_queue.put({"id": request_id, "type": "search_result", "status": "success", "data": result.content})
                                     except Exception as e_tool_call:
@@ -206,29 +208,21 @@ async def submit_search_request(query: str) -> str: # Changed to async
 
 async def wait_for_response(request_id: str, timeout: int = 45) -> Dict: # Changed to async
     start_time = time.time()
-    # This temporary list approach to drain and refill is not ideal for asyncio.Queue
-    # if multiple consumers were possible. For a single consumer per request_id, it's okay.
-    # A more robust asyncio pattern might involve a dictionary of asyncio.Event objects.
-    # However, for this specific use case where one task waits for one response, it can be adapted.
     try:
         while time.time() - start_time < timeout:
             try:
-                # Try to get an item, but with a short async timeout to yield control
                 item = await asyncio.wait_for(response_queue.get(), timeout=0.05)
                 if item.get("id") == request_id:
-                    response_queue.task_done() # Signal that the item is processed
+                    response_queue.task_done() 
                     return item
                 else:
-                    # If it's not our item, put it back. This could be problematic if order matters
-                    # or if other tasks are also waiting for items from this same queue.
-                    # For this specific app structure, it might be acceptable.
                     await response_queue.put(item) 
-            except asyncio.TimeoutError: # Timeout from asyncio.wait_for - queue was empty or first item not ready
-                pass # Continue the outer loop
-            except asyncio.QueueEmpty: # Should not happen with await get() unless queue is truly empty and wait_for timed out
+            except asyncio.TimeoutError: 
+                pass 
+            except asyncio.QueueEmpty: 
                 pass
-            await asyncio.sleep(0.05) # Yield control and check again shortly
-    except Exception as e: # Catch any unexpected errors during the wait
+            await asyncio.sleep(0.05) 
+    except Exception as e: 
         logger.error(f"Error in wait_for_response for {request_id}: {e}", exc_info=True)
     
     return {"id": request_id, "type": "search_result", "status": "error", "error": "Request timed out"}
@@ -245,37 +239,68 @@ async def chat_with_ollama(messages: List[Dict[str, str]], model_name: str) -> O
         logger.error(f"[Ollama] Error with model '{model_name}': {e}", exc_info=True)
         return None
 
-def extract_search_results(response_content):
+def extract_search_results(response_content: Any) -> Dict:
     logger.debug(f"extract_search_results: Input type: {type(response_content)}, content preview: {str(response_content)[:200]}")
+
     if isinstance(response_content, dict):
-        logger.debug("extract_search_results: Input is dict, returning as-is")
+        logger.debug("extract_search_results: Input is dict, returning as-is.")
         return response_content
+    
     elif isinstance(response_content, list):
-        logger.debug(f"extract_search_results: Input is list with {len(response_content)} items")
-        if len(response_content) == 1 and isinstance(response_content[0], dict):
-            logger.debug("extract_search_results: Extracting single dict from list")
-            return response_content[0]
+        logger.debug(f"extract_search_results: Input is list with {len(response_content)} items. First item type: {type(response_content[0]) if response_content else 'N/A'}")
+        if len(response_content) == 1:
+            item = response_content[0]
+            if isinstance(item, dict):
+                logger.debug("extract_search_results: Extracting single dict from list.")
+                return item
+            # Duck-typing for TextContent-like objects from MCP
+            elif hasattr(item, 'text') and isinstance(item.text, str):
+                logger.debug("extract_search_results: Item in list is TextContent-like, parsing item.text.")
+                try:
+                    parsed_dict = json.loads(item.text)
+                    return parsed_dict
+                except json.JSONDecodeError as e:
+                    logger.error(f"extract_search_results: JSONDecodeError parsing item.text from list: {e}. Text was: {item.text[:200]}")
+                    return {"status": "error", "message": "Failed to parse JSON from TextContent in list."}
+            else:
+                logger.error(f"extract_search_results: Single item in list is not a dict or TextContent-like. Type: {type(item)}")
+                return {"status": "error", "message": "Unexpected item type in single-item results list."}
         elif len(response_content) > 1:
-            logger.warning(f"extract_search_results: Multiple items in list ({len(response_content)}), using first")
-            # Consider if this is safe, or if it should be an error or specific handling
-            return response_content[0] 
+            # This case might indicate multiple ContentParts; typically we'd expect one TextContent for simple JSON.
+            # For now, try to process the first if it's TextContent-like.
+            logger.warning(f"extract_search_results: Multiple items in list ({len(response_content)}), attempting to process first item if TextContent-like.")
+            item = response_content[0]
+            if hasattr(item, 'text') and isinstance(item.text, str):
+                logger.debug("extract_search_results: First item in multi-item list is TextContent-like, parsing item.text.")
+                try:
+                    return json.loads(item.text)
+                except json.JSONDecodeError as e:
+                    logger.error(f"extract_search_results: JSONDecodeError parsing item.text from multi-item list: {e}. Text was: {item.text[:200]}")
+                    return {"status": "error", "message": "Failed to parse JSON from first TextContent in multi-item list."}
+            else: # Fallback or if first item isn't what we expect
+                logger.error(f"extract_search_results: First item in multi-item list is not TextContent-like or unhandled structure. Type: {type(item)}")
+                return {"status": "error", "message": "Unhandled structure in multi-item results list."}
         else: # len(response_content) == 0
-            logger.error("extract_search_results: Empty list received")
-            return {"status": "error", "message": "Empty results list"}
+            logger.error("extract_search_results: Empty list received.")
+            return {"status": "error", "message": "Empty results list received from tool."} # Clarified message
+
+    # Fallback for direct TextContent-like object (if not wrapped in a list by MCP in some scenario)
     elif hasattr(response_content, 'text') and isinstance(response_content.text, str):
-        logger.debug("extract_search_results: Input has .text attribute, attempting JSON parse")
+        logger.debug("extract_search_results: Input is TextContent-like (not in list), parsing .text.")
         try:
             return json.loads(response_content.text)
         except json.JSONDecodeError as e:
-            logger.error(f"extract_search_results: JSONDecodeError from .text: {e}")
+            logger.error(f"extract_search_results: JSONDecodeError parsing .text: {e}. Text was: {response_content.text[:200]}")
             return {"status": "error", "message": "Failed to parse search JSON from .text."}
+            
     elif isinstance(response_content, str):
-        logger.debug("extract_search_results: Input is string, attempting JSON parse")
+        logger.debug("extract_search_results: Input is string, attempting JSON parse.")
         try:
             return json.loads(response_content)
         except json.JSONDecodeError as e:
             logger.error(f"extract_search_results: JSONDecodeError from string: {e}")
             return {"status": "error", "message": "Failed to parse search JSON string."}
+            
     else:
         logger.error(f"extract_search_results: Unhandled type: {type(response_content)}. Content: {str(response_content)[:200]}...")
         return {"status": "error", "message": f"Search result was not a recognized format. Type: {type(response_content)}"}
@@ -284,15 +309,37 @@ def extract_search_results(response_content):
 def format_search_results_for_prompt(results_data, query, max_results=3):
     if not isinstance(results_data, dict) or results_data.get("status") == "error":
         return f"Search for '{query}': {results_data.get('message', 'Error or no valid results structure.')}"
+    
+    # The server_search.py tool now returns a dict with "organic_results" key directly.
     organic = results_data.get('organic_results', [])
-    if not organic and isinstance(results_data, list):
-        organic = results_data
+    
+    # This old check might not be needed if server_search.py is consistent
+    # if not organic and isinstance(results_data, list): 
+    #     organic = results_data # This would imply results_data itself was the list of items
+
     if organic and isinstance(organic, list):
-        return f"Web search results for '{query}':\n" + "\n".join(f"{i+1}. {item.get('title', 'N/A')}\n   {item.get('snippet', 'N/A')}\n   Source: {item.get('link', 'N/A')}" for i, item in enumerate(organic[:max_results]) if isinstance(item, dict))
-    elif not organic:
-        return f"Search for '{query}' returned no specific organic results. Data: {str(results_data)[:200]}"
-    else:
-        return f"Search for '{query}' returned data in an unexpected format. Data: {str(results_data)[:200]}"
+        # Ensure items in organic are dicts before trying to get 'title', 'snippet', 'link'
+        formatted_results = []
+        for i, item in enumerate(organic[:max_results]):
+            if isinstance(item, dict):
+                title = item.get('title', 'N/A')
+                snippet = item.get('snippet', 'N/A')
+                link = item.get('link', 'N/A')
+                formatted_results.append(f"{i+1}. {title}\n   {snippet}\n   Source: {link}")
+            else:
+                logger.warning(f"format_search_results_for_prompt: Skipping non-dict item in organic_results: {item}")
+        if not formatted_results:
+             return f"Search for '{query}' returned organic results, but items were not in the expected format."
+        return f"Web search results for '{query}':\n" + "\n".join(formatted_results)
+    elif not organic: # organic is empty or not a list
+        # Check if other keys like 'top_stories' or 'people_also_ask' have content,
+        # if you want to use them as fallback. For now, just report based on organic.
+        answer = results_data.get('answer_box', {}).get('answer')
+        if answer:
+            return f"Web search results for '{query}':\n{answer}"
+        return f"Search for '{query}' returned no specific organic results. Full data: {str(results_data)[:200]}"
+    else: # organic is not a list (should not happen if server_search.py is correct)
+        return f"Search for '{query}' returned organic data in an unexpected format. Data: {str(results_data)[:200]}"
 
 
 class ChatMessage(BaseModel):
@@ -381,14 +428,17 @@ async def process_chat_request(payload: ChatPayload) -> ChatResponse:
         else:
             logger.info(f"[API_CHAT] Search active for: '{user_msg_content}'")
             try:
-                req_id = await submit_search_request(user_msg_content) # Changed to await
+                req_id = await submit_search_request(user_msg_content) 
                 logger.debug(f"[API_CHAT] Submitted search request with ID: {req_id}")
 
-                mcp_resp = await wait_for_response(req_id, timeout=90) # Changed to await, timeout increased in original code
+                mcp_resp = await wait_for_response(req_id, timeout=90) 
                 logger.debug(f"[API_CHAT] Received MCP response: {mcp_resp}")
 
-                if mcp_resp.get("status") == "error":
-                    logger.error(f"[API_CHAT] MCP response indicates error: {mcp_resp.get('error')}")
+                if mcp_resp.get("status") == "error" and mcp_resp.get("error") == "Request timed out": # Check for timeout specifically
+                    logger.error(f"[API_CHAT] MCP response timed out: {mcp_resp.get('error')}")
+                    raise Exception("Search request timed out.") # Specific exception for timeout
+                elif mcp_resp.get("status") == "error": # Other errors from MCP tool call itself
+                    logger.error(f"[API_CHAT] MCP response indicates tool error: {mcp_resp.get('error')}")
                     raise Exception(mcp_resp.get("error", "MCP search tool returned an error status"))
 
                 raw_data = mcp_resp.get("data")
@@ -403,6 +453,16 @@ async def process_chat_request(payload: ChatPayload) -> ChatResponse:
 
                 search_summary_text = format_search_results_for_prompt(extracted_results_data, user_msg_content)
                 logger.debug(f"[API_CHAT] Formatted search summary (first 200 chars): {search_summary_text[:200]}")
+                
+                if "Error or no valid results structure" in search_summary_text or \
+                   "returned no specific organic results" in search_summary_text or \
+                   "data in an unexpected format" in search_summary_text or \
+                   "items were not in the expected format" in search_summary_text:
+                    logger.warning(f"[API_CHAT] Search summary indicates issues or no results: {search_summary_text}")
+                    # Potentially raise an exception or set assist_err_msg_obj here if this is critical
+                    # For now, we'll let it proceed but the LLM might not get useful context.
+                    # If the search itself was "successful" but yielded no usable items, that's different from a technical error.
+
                 search_html_indicator = f"<div class='search-indicator-custom'><b>🔍 Web Search:</b> Results for \"{user_msg_content}\" were used.</div>"
                 prompt_llm = (f"Based on the following web search results for '{user_msg_content}':\n{search_summary_text}\n\n"
                               f"Please answer the user's original question: '{user_msg_content}'")
@@ -421,14 +481,14 @@ async def process_chat_request(payload: ChatPayload) -> ChatResponse:
 
     if model_resp_content:
         assist_ui_resp = model_resp_content; is_html_resp = False
-        if search_html_indicator and not assist_err_msg_obj:
+        if search_html_indicator and not assist_err_msg_obj: # Only add indicator if search didn't result in an error message
             assist_ui_resp = f"{search_html_indicator}\n\n{model_resp_content}"; is_html_resp = True
         assist_chat_msg = ChatMessage(role="assistant", content=assist_ui_resp, is_html=is_html_resp)
         ui_history.append(assist_chat_msg)
         assist_msg_to_save = assist_chat_msg.model_dump(exclude_none=True)
         assist_msg_to_save["raw_content_for_llm"] = model_resp_content
         if obj_id: conversations_collection.update_one({"_id": obj_id}, {"$push": {"messages": assist_msg_to_save}, "$set": {"updated_at": datetime.now(timezone.utc)}})
-    elif not assist_err_msg_obj:
+    elif not assist_err_msg_obj: # Only add LLM error if no search error message was already prepared
         llm_err_chat_msg = ChatMessage(role="assistant", content=f"Sorry, I could not get a response from the model ({model_name}).")
         ui_history.append(llm_err_chat_msg)
         if obj_id: conversations_collection.update_one({"_id": obj_id}, {"$push": {"messages": llm_err_chat_msg.model_dump(exclude_none=True)}, "$set": {"updated_at": datetime.now(timezone.utc)}})
