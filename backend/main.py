@@ -34,8 +34,9 @@ if not os.path.exists(MCP_SERVER_SCRIPT):
         MCP_SERVER_SCRIPT = os.path.join(os.path.dirname(__file__), MCP_SERVER_SCRIPT)
 
 os.makedirs('logs', exist_ok=True)
+# BasicConfig sets the root logger. We'll set the specific logger level later.
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG, # Set basicConfig to DEBUG to allow specific loggers to use it.
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler(f"logs/mcp_backend_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"),
@@ -43,6 +44,7 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger("mcp_backend")
+logger.setLevel(logging.DEBUG) # Set our specific logger to DEBUG level
 
 # --- MongoDB Setup ---
 MONGODB_URI = os.getenv('MONGODB_URI', 'mongodb://localhost:27017/')
@@ -247,16 +249,34 @@ class ConversationListItem(BaseModel):
 
 async def get_default_ollama_model() -> str:
     try:
+        logger.debug("Attempting to fetch Ollama models list for default model selection...")
         models_info = await asyncio.to_thread(ollama.list)
-        if models_info and models_info.get('models') and len(models_info['models']) > 0:
-            # Prefer a non-embedding model if possible, otherwise first model
-            non_embedding_models = [m['name'] for m in models_info['models'] if 'embed' not in m.get('family', '').lower() and 'embed' not in m.get('name','').lower()]
-            if non_embedding_models:
-                return non_embedding_models[0]
-            return models_info['models'][0]['name']
-        logger.warning("No Ollama models found via API when determining default. Falling back to hardcoded default.")
+        logger.debug(f"Ollama models_info for default model: {models_info}")
+
+        if models_info and isinstance(models_info.get('models'), list) and models_info['models']:
+            valid_models_with_names = [
+                m for m in models_info['models'] 
+                if isinstance(m, dict) and m.get('name')
+            ]
+
+            if not valid_models_with_names:
+                logger.warning("No models with valid names found in Ollama response for default model selection.")
+            else:
+                non_embedding_models = [
+                    m['name'] for m in valid_models_with_names
+                    if 'embed' not in m.get('family', '').lower() and \
+                       'embed' not in m.get('name', '').lower() # m.get('name') is already confirmed truthy here
+                ]
+                if non_embedding_models:
+                    logger.debug(f"Found non-embedding models for default: {non_embedding_models}, selecting {non_embedding_models[0]}")
+                    return non_embedding_models[0]
+                
+                logger.info(f"No non-embedding models found, falling back to the first available model with a name: {valid_models_with_names[0]['name']}")
+                return valid_models_with_names[0]['name']
+        
+        logger.warning("No Ollama models found or 'models' key is not a non-empty list in API response when determining default. Falling back to hardcoded default.")
     except Exception as e:
-        logger.warning(f"Could not fetch Ollama models list to determine default: {e}. Falling back to hardcoded default: {DEFAULT_OLLAMA_MODEL}")
+        logger.warning(f"Could not fetch or parse Ollama models list to determine default: {e}. Falling back to hardcoded default: {DEFAULT_OLLAMA_MODEL}", exc_info=True)
     return DEFAULT_OLLAMA_MODEL
 
 
@@ -431,14 +451,16 @@ async def list_ollama_models():
     try:
         logger.info("Attempting to fetch Ollama models list from Ollama server...")
         models_info = await asyncio.to_thread(ollama.list)
-        logger.debug(f"Raw response from ollama.list: {models_info}")
+        # Using logger.debug for potentially large output, ensure logger level is DEBUG
+        logger.debug(f"Ollama models_info content: {models_info}")
+
 
         if models_info and 'models' in models_info and isinstance(models_info['models'], list):
+            # Filter for models that are dicts and have a truthy 'name'
             model_names = [model['name'] for model in models_info['models'] if isinstance(model, dict) and model.get('name')]
+            
             if not model_names:
-                 logger.warning("No Ollama models found in the response, or all models have empty/missing names.")
-                 # Return empty list instead of 404, as Ollama might just have no models installed.
-                 # Frontend can then message "No models available"
+                 logger.warning("No Ollama models with valid names found in the response.")
                  return [] 
             logger.info(f"Successfully fetched and parsed model names: {model_names}")
             return model_names
@@ -450,11 +472,8 @@ async def list_ollama_models():
         logger.error(f"Ollama API response error when fetching models: Status {e.status_code} - {e.error}", exc_info=True)
         raise HTTPException(status_code=e.status_code if e.status_code else 500, detail=f"Ollama API error: {e.error}")
     
-    except ollama.RequestError as e: # Handles connection errors, timeouts, etc.
+    except ollama.RequestError as e: 
         ollama_host_env = os.getenv('OLLAMA_HOST')
-        # Determine the host ollama client likely tried. Default is http://localhost:11434
-        # The ollama client has its own logic for parsing OLLAMA_HOST.
-        # This is an approximation for the error message.
         actual_host_tried = "http://localhost:11434" 
         if ollama_host_env:
             if not ollama_host_env.startswith(('http://', 'https://')):
@@ -480,7 +499,6 @@ async def list_conversations():
         ).sort("updated_at", -1).limit(50) 
         
         conversation_list = []
-        # Fetch default model once, to avoid repeated calls if many old records need it.
         _default_model_for_list = None 
 
         for conv_data_from_db in convs_cursor:
@@ -494,7 +512,7 @@ async def list_conversations():
             item_data_for_validation["message_count"] = message_count
             
             if "ollama_model_name" not in item_data_for_validation or not item_data_for_validation["ollama_model_name"]:
-                if _default_model_for_list is None: # Fetch only if needed and not already fetched
+                if _default_model_for_list is None: 
                     _default_model_for_list = await get_default_ollama_model()
                 item_data_for_validation["ollama_model_name"] = _default_model_for_list
             
@@ -549,7 +567,6 @@ if __name__ == "__main__":
         if mongo_client:
             mongo_client.close()
             logger.info("MongoDB connection closed.")
-        # Potentially add cleanup for MCP service thread if needed, though daemon=True helps.
         sys.exit(0)
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
