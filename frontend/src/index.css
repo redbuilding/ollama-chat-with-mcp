@@ -1,0 +1,67 @@
+@tailwind base;
+
+@tailwind components;
+
+@tailwind utilities;
+
+@layer base {
+    body {
+        @apply bg-brand-main-bg text-brand-text-primary antialiased;
+
+        font-family:
+            -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
+            Arial, sans-serif, "Apple
+Color Emoji", "Segoe UI Emoji",
+            "Segoe UI Symbol";
+    }
+
+    /* Custom scrollbar for a more integrated dark mode feel */
+
+    ::-webkit-scrollbar {
+        width: 8px;
+
+        height: 8px;
+    }
+
+    ::-webkit-scrollbar-track {
+        @apply bg-brand-surface-bg;
+    }
+
+    ::-webkit-scrollbar-thumb {
+        @apply bg-brand-purple rounded;
+    }
+
+    ::-webkit-scrollbar-thumb:hover {
+        @apply bg-brand-button-grad-to;
+    }
+}
+
+@layer components {
+    /* Custom class for the search indicator HTML coming from backend */
+
+    .search-indicator-custom {
+        @apply bg-brand-surface-bg border-l-4 border-brand-blue p-3 my-2 text-sm text-brand-text-secondary
+rounded-r-md;
+    }
+
+    .search-indicator-custom b {
+        @apply text-brand-text-primary font-semibold;
+    }
+
+    /* Styling for code blocks if not using a dedicated highlighter */
+
+    pre {
+        @apply bg-gray-800 p-4 rounded-md overflow-x-auto text-sm my-2; /* Slightly different from surface-bg for
+emphasis */
+
+        border: 1px solid theme("colors.brand.surface-bg");
+    }
+
+    pre code {
+        font-family:
+            "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Courier,
+            monospace;
+
+        @apply text-gray-300;
+    }
+}

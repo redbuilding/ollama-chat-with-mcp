@@ -142,7 +142,7 @@ async def main():
 
     server_params = StdioServerParameters(
         command="python",
-        args=["server.py"],
+        args=["server_search.py"],
         env=None
     )
 

@@ -69,7 +69,7 @@ async def mcp_service_loop():
         # Initialize MCP connection
         server_params = StdioServerParameters(
             command="python",
-            args=["server.py"],
+            args=["server_search.py"],
             env=None
         )
 
