@@ -1,13 +1,14 @@
 import React from 'react';
-import { PlusSquare, MessageSquare, Loader2 } from 'lucide-react';
+import { PlusSquare, MessageSquare, Loader2, AlertTriangle } from 'lucide-react';
 
 const ConversationSidebar = ({
   conversations,
   currentConversationId,
   onSelectConversation,
   onNewChat,
-  isLoading,
+  isLoading, // This is isConversationsLoading from App.jsx
   dbConnected,
+  conversationsError,
 }) => {
   const formatDate = (isoString) => {
     if (!isoString) return '';
@@ -27,26 +28,38 @@ const ConversationSidebar = ({
         New Chat
       </button>
       <h2 className="text-sm font-semibold text-brand-text-secondary mb-2 px-2">History</h2>
+      
       {isLoading && (
         <div className="flex items-center justify-center py-4">
           <Loader2 size={24} className="animate-spin text-brand-purple" />
         </div>
       )}
-      {!isLoading && !dbConnected && (
+
+      {!isLoading && conversationsError && (
+        <div className="text-xs text-brand-alert-red p-2 rounded bg-red-900/30 mb-2 flex items-start">
+          <AlertTriangle size={16} className="mr-2 flex-shrink-0 mt-0.5" /> 
+          <span>Error: {conversationsError}</span>
+        </div>
+      )}
+
+      {/* This condition is now implicitly covered by conversationsError or successful load */}
+      {/* {!isLoading && !conversationsError && !dbConnected && (
         <div className="text-xs text-brand-alert-red p-2 rounded bg-red-900/30">
           Database not connected. History is unavailable.
         </div>
-      )}
-      {!isLoading && dbConnected && conversations.length === 0 && (
+      )} */}
+
+      {!isLoading && !conversationsError && dbConnected && conversations.length === 0 && (
         <p className="text-xs text-brand-text-secondary px-2">No past conversations.</p>
       )}
+
       <div className="flex-grow overflow-y-auto space-y-1 pr-1 -mr-1">
-        {dbConnected &&
+        {!isLoading && !conversationsError && dbConnected &&
           conversations
-            .filter(conv => conv && typeof conv.id === 'string' && conv.id.trim() !== '') // Ensure conv and conv.id are valid
+            .filter(conv => conv && typeof conv.id === 'string' && conv.id.trim() !== '') 
             .map((conv) => (
               <button
-                key={conv.id} // conv.id should now be a valid, non-empty string
+                key={conv.id} 
                 onClick={() => onSelectConversation(conv.id)}
                 className={`w-full flex items-start text-left p-2 rounded-md text-sm transition-colors duration-150 focus:outline-none
                   ${
