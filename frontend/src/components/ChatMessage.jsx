@@ -64,9 +64,9 @@ const ChatMessage = ({ message }) => {
 
 
   return (
-    <div className={`flex animate-slide-up ${isUser ? 'justify-end' : 'justify-start'} mb-4 group`}>
+    <div className={`flex animate-slide-up ${isUser ? 'justify-end' : 'justify-start'} mb-2 group`}>
       <div
-        className={`max-w-[80%] p-3 rounded-lg shadow ${
+        className={`max-w-2xl p-3 rounded-lg shadow ${
           isUser ? 'bg-brand-blue text-white rounded-br-none' : 'bg-brand-surface-bg text-brand-text-primary rounded-bl-none'
         }`}
       >

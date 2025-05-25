@@ -92,12 +92,12 @@ const App = () => {
         <h1 className="text-xl font-semibold text-brand-purple">Ollama Chat with MCP</h1>
         <div className="text-xs text-brand-text-secondary flex items-center space-x-4 mt-1">
             <span className={`flex items-center ${mcpServiceReady ? 'text-brand-success-green' : 'text-brand-alert-red'}`}>
-                {mcpServiceReady ? <Wifi size={14} className="mr-1" /> : <WifiOff size={14} className="mr-1" />}
-                MCP Search: {mcpServiceReady ? 'Ready' : 'Unavailable'}
+                {mcpServiceReady ? <Wifi size={14} className="mr-1" /> : <AlertTriangle size={14} className="mr-1" />}
+                Search: {mcpServiceReady ? 'Ready' : 'Unavailable'}
             </span>
             <span className="flex items-center text-brand-text-secondary">
                 <Server size={14} className="mr-1" />
-                LLM: {ollamaModel}
+                Model: {ollamaModel}
             </span>
         </div>
       </header>
