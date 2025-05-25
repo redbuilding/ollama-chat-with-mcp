@@ -7,8 +7,16 @@ import httpx
 from mcp.server.fastmcp import FastMCP
 import logging # Import standard logging
 
+# Get a logger for this module specifically for setup and script-level messages
+# This logger will be used for messages outside of mcp.run() or mcp.tool() contexts
+script_logger = logging.getLogger("server_search_script")
+# Basic configuration for the script_logger if this script is run directly.
+# If run as a subprocess, its logs to stderr should be captured by main.py's MCP client logger.
+if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+
 # Create an MCP server instance using FastMCP
-# Initialize mcp instance early so mcp.logger is available for dotenv loading messages
 mcp = FastMCP(
     name="WebSearchServer",
     version="0.1.0",
@@ -20,17 +28,16 @@ mcp = FastMCP(
 # Make .env loading more robust: search from script directory upwards
 dotenv_path = find_dotenv(usecwd=False, raise_error_if_not_found=False)
 if dotenv_path:
-    mcp.logger.info(f"Loading .env file from: {dotenv_path}")
+    script_logger.info(f"Loading .env file from: {dotenv_path}")
     load_dotenv(dotenv_path)
 else:
-    mcp.logger.warning("No .env file found by find_dotenv(). Relying on default load_dotenv() behavior or existing environment variables.")
+    script_logger.warning("No .env file found by find_dotenv(). Relying on default load_dotenv() behavior or existing environment variables.")
     load_dotenv() # Try default behavior (e.g. CWD)
 
 SERPER_API_KEY = os.getenv("SERPER_API_KEY")
 if not SERPER_API_KEY:
-    # Use mcp.logger now that it's initialized
-    mcp.logger.critical("SERPER_API_KEY environment variable not set. Please ensure it's in your .env file or environment.")
-    # Raising an error here will cause the script to exit, which should be caught by main.py if stderr is monitored.
+    script_logger.critical("SERPER_API_KEY environment variable not set. Please ensure it's in your .env file or environment.")
+    # Raising an error here will cause the script to exit.
     raise ValueError("SERPER_API_KEY environment variable not set. Please create a .env file with your key or set it in the environment.")
 
 SERPER_API_URL = "https://google.serper.dev/search"
@@ -48,6 +55,7 @@ async def web_search(query: str) -> dict:
     Returns:
         A standardized dictionary containing search results or error information
     """
+    # Inside the tool, mcp.logger is expected to be available and configured by the MCP framework.
     if not query:
         mcp.logger.warning("web_search called with empty query.")
         return {
@@ -109,10 +117,11 @@ async def web_search(query: str) -> dict:
         }
 
 if __name__ == "__main__":
-    mcp.logger.info("Starting Web Search MCP Server (server_search.py)...")
+    # Use the script_logger for messages in this block.
+    script_logger.info("Starting Web Search MCP Server (server_search.py directly)...")
     try:
         mcp.run()
-    except Exception as e: # Catch exceptions during mcp.run() itself, e.g., if port is blocked (not relevant for stdio)
-        mcp.logger.exception("Web Search MCP Server (server_search.py) crashed during run.")
+    except Exception as e: 
+        script_logger.exception("Web Search MCP Server (server_search.py directly) crashed during run.")
     finally:
-        mcp.logger.info("Web Search MCP Server (server_search.py) stopped.")
+        script_logger.info("Web Search MCP Server (server_search.py directly) stopped.")
