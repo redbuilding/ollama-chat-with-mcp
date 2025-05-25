@@ -26,13 +26,15 @@ import queue
 
 # --- Environment Setup ---
 MCP_SERVER_SCRIPT = "server_search.py"
-_main_py_dir = os.path.dirname(os.path.abspath(__file__))
+_main_py_dir = os.path.dirname(os.path.abspath(__file__)) # Directory of main.py (backend)
 MCP_SERVER_SCRIPT_ABS_PATH = os.path.join(_main_py_dir, MCP_SERVER_SCRIPT)
+PROJECT_ROOT_DIR = os.path.dirname(_main_py_dir) # Parent directory of backend (e.g., /Users/qasim/Documents/ai/mcp)
 
 if not os.path.exists(MCP_SERVER_SCRIPT_ABS_PATH):
     logging.error(f"CRITICAL: MCP server script '{MCP_SERVER_SCRIPT_ABS_PATH}' not found. Searched in directory: '{_main_py_dir}'. Search functionality will be disabled.")
 else:
     logging.info(f"MCP server script found at: {MCP_SERVER_SCRIPT_ABS_PATH}")
+logging.info(f"Project root directory determined as: {PROJECT_ROOT_DIR}")
 
 
 os.makedirs('logs', exist_ok=True)
@@ -94,18 +96,28 @@ async def mcp_service_loop():
         return
 
     mcp_client_comms_logger = logger.getChild("mcp_client_comms")
-    mcp_client_comms_logger.setLevel(logging.DEBUG) # Ensure this logger captures DEBUG from MCP client library
+    mcp_client_comms_logger.setLevel(logging.DEBUG) 
 
-    server_script_dir = os.path.dirname(MCP_SERVER_SCRIPT_ABS_PATH) # Get directory of server_search.py
+    server_script_dir = os.path.dirname(MCP_SERVER_SCRIPT_ABS_PATH) 
+
+    # Prepare environment for the subprocess
+    subproc_env = os.environ.copy()
+    # Prepend project root to PYTHONPATH to help find project-local 'mcp' library
+    existing_pythonpath = subproc_env.get("PYTHONPATH")
+    new_pythonpath = PROJECT_ROOT_DIR
+    if existing_pythonpath:
+        new_pythonpath = f"{PROJECT_ROOT_DIR}{os.pathsep}{existing_pythonpath}"
+    subproc_env["PYTHONPATH"] = new_pythonpath
+    logger.info(f"MCP_SERVICE_LOOP: Subprocess PYTHONPATH set to: {new_pythonpath}")
+
 
     while True: 
         try:
             logger.info(f"MCP_SERVICE_LOOP: Setting CWD for subprocess to: {server_script_dir}")
-            # Use sys.executable to ensure the same Python interpreter is used for the subprocess
             server_params_for_client = StdioServerParameters(
-                command=sys.executable, # Changed back to sys.executable
+                command=sys.executable, 
                 args=[MCP_SERVER_SCRIPT_ABS_PATH], 
-                env=None,
+                env=subproc_env, # Pass the modified environment
                 cwd=server_script_dir 
             )
             logger.info(f"MCP_SERVICE_LOOP: Attempting to start MCP server using stdio_client with: command='{sys.executable}', args=['{MCP_SERVER_SCRIPT_ABS_PATH}'], cwd='{server_script_dir}'")
