@@ -9,15 +9,19 @@ const apiClient = axios.create({
   },
 });
 
-export const sendMessage = async (userMessage, chatHistory, useSearch, conversationId = null) => {
+export const sendMessage = async (userMessage, chatHistory, useSearch, conversationId = null, ollamaModelName = null) => {
   try {
-    const response = await apiClient.post("/chat", {
+    const payload = {
       user_message: userMessage,
       chat_history: chatHistory, // Current UI history, backend might load canonical from DB
       use_search: useSearch,
       conversation_id: conversationId,
-    });
-    // Response should now be { conversation_id: "...", chat_history: [...] }
+    };
+    if (ollamaModelName && !conversationId) { // Only send model for new chats
+      payload.ollama_model_name = ollamaModelName;
+    }
+    const response = await apiClient.post("/chat", payload);
+    // Response should now be { conversation_id: "...", chat_history: [...], ollama_model_name: "..." }
     return response.data; 
   } catch (error) {
     console.error(
@@ -33,7 +37,7 @@ export const sendMessage = async (userMessage, chatHistory, useSearch, conversat
 export const getServiceStatus = async () => {
   try {
     const response = await apiClient.get("/status");
-    // Expected: { service_ready: bool, ollama_model: str, db_connected: bool }
+    // Expected: { service_ready: bool, db_connected: bool, ollama_available: bool }
     return response.data;
   } catch (error) {
     console.error(
@@ -46,10 +50,28 @@ export const getServiceStatus = async () => {
   }
 };
 
+export const getOllamaModels = async () => {
+  try {
+    const response = await apiClient.get("/ollama-models");
+    // Expected: ["model1:latest", "model2:latest", ...]
+    return response.data;
+  } catch (error) {
+    console.error(
+      "Error fetching Ollama models:",
+      error.response ? error.response.data : error.message,
+    );
+    // Return an empty array or rethrow specific error type if needed by UI
+    // For now, rethrowing to be handled by the caller
+    throw error.response
+      ? error.response.data
+      : new Error("Network error or server unavailable fetching Ollama models");
+  }
+};
+
 export const getConversations = async () => {
   try {
     const response = await apiClient.get("/conversations");
-    // Expected: [{ id: "...", title: "...", created_at: "...", updated_at: "...", message_count: 0 }, ...]
+    // Expected: [{ id: "...", title: "...", created_at: "...", updated_at: "...", message_count: 0, ollama_model_name: "..." }, ...]
     return response.data;
   } catch (error) {
     console.error(
@@ -66,6 +88,8 @@ export const getConversationMessages = async (conversationId) => {
   try {
     const response = await apiClient.get(`/conversations/${conversationId}`);
     // Expected: [{ role: "...", content: "...", is_html: false, timestamp: "..." }, ...]
+    // This endpoint currently does not return the model name for the conversation,
+    // it's assumed to be known from the conversation list or the chat response.
     return response.data;
   } catch (error) {
     console.error(
