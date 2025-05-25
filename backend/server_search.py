@@ -9,7 +9,7 @@ import sys
 
 # Get a logger for this module specifically for setup and script-level messages
 script_logger = logging.getLogger("server_search_script")
-script_logger.setLevel(logging.INFO)
+script_logger.setLevel(logging.INFO) # Set to DEBUG to see more detailed logs from here
 if not script_logger.hasHandlers():
     stderr_handler = logging.StreamHandler(sys.stderr)
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - [SERVER_SEARCH] %(message)s')
@@ -66,7 +66,7 @@ async def web_search(query: str) -> dict:
         return {
             "status": "error",
             "message": "Missing required parameter 'query' for web_search tool.",
-            "results": []
+            "results": [] # Consistent with error structure
         }
 
     headers = {
@@ -80,29 +80,38 @@ async def web_search(query: str) -> dict:
         async with httpx.AsyncClient(timeout=20) as client:
             response = await client.post(SERPER_API_URL, headers=headers, data=payload)
         response.raise_for_status()
-        search_results = response.json()
+        search_results = response.json() # This is already a dict
         script_logger.info(f"Search successful for: '{query}'")
+        
+        # Log the actual results for debugging
+        # Use INFO level for this potentially large log, or DEBUG if preferred for less noise
+        script_logger.debug(f"Serper API response: {json.dumps(search_results, indent=2)}")
 
-        # Return the structured dict
-        return {
+        # Return a single dict (not a list!)
+        result = {
             "status": "success",
             "message": f"Search completed for: {query}",
             "query": query,
             "organic_results": search_results.get("organic", []),
             "top_stories": search_results.get("topStories", []),
             "people_also_ask": search_results.get("peopleAlsoAsk", [])
+            # You can include other parts of search_results if needed
         }
+        
+        script_logger.debug(f"Returning result: {json.dumps(result, indent=2)}")
+        return result # Ensure this is a dict
+
     except httpx.TimeoutException:
         script_logger.error(f"Timeout calling Serper.dev API for query '{query}'")
-        return {"status": "error", "message": f"Timeout performing search for: {query}", "results": []} # Updated message
+        return {"status": "error", "message": f"Timeout performing search for: {query}", "results": []}
     except httpx.HTTPStatusError as e:
         error_detail = e.response.text
         try:
             error_detail = e.response.json()
         except json.JSONDecodeError:
-            pass # Keep error_detail as text if not JSON
+            pass 
         script_logger.error(f"HTTP error for query '{query}': {e.response.status_code}. Response: {error_detail}")
-        return {"status": "error", "message": f"API Error ({e.response.status_code}): {error_detail}", "results": []} # Updated message
+        return {"status": "error", "message": f"API Error ({e.response.status_code}): {error_detail}", "results": []}
     except Exception as e:
         script_logger.exception(f"Unexpected error during web_search for query '{query}': {e}")
         return {"status": "error", "message": str(e), "results": []}

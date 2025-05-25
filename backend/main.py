@@ -237,24 +237,27 @@ async def chat_with_ollama(messages: List[Dict[str, str]], model_name: str) -> O
 
 def extract_search_results(response_content):
     """Extract and normalize search results from MCP response"""
-    # If it's already a dict, return it
+    logger.debug(f"extract_search_results: Input type: {type(response_content)}, content preview: {str(response_content)[:200]}")
+
     if isinstance(response_content, dict):
+        logger.debug("extract_search_results: Input is dict, returning as-is")
         return response_content
     
-    # If it's a list with one dict item (common MCP pattern)
-    elif isinstance(response_content, list) and len(response_content) == 1 and isinstance(response_content[0], dict):
-        return response_content[0]
-    
-    # If it's a list of results, wrap it
     elif isinstance(response_content, list):
-        return {
-            "status": "success",
-            "organic_results": response_content,
-            "message": "Search results returned as list"
-        }
+        logger.debug(f"extract_search_results: Input is list with {len(response_content)} items")
+        if len(response_content) == 1 and isinstance(response_content[0], dict):
+            logger.debug("extract_search_results: Extracting single dict from list")
+            return response_content[0]
+        elif len(response_content) > 1:
+            logger.warning(f"extract_search_results: Multiple items in list ({len(response_content)}), using first")
+            return response_content[0] # Assumes the first item is the desired dict or can be handled downstream
+        else: # len(response_content) == 0
+            logger.error("extract_search_results: Empty list received")
+            return {"status": "error", "message": "Empty results list"}
     
     # Handle text content with JSON
     elif hasattr(response_content, 'text') and isinstance(response_content.text, str):
+        logger.debug("extract_search_results: Input has .text attribute, attempting JSON parse")
         try:
             return json.loads(response_content.text)
         except json.JSONDecodeError as e:
@@ -263,6 +266,7 @@ def extract_search_results(response_content):
     
     # Handle string JSON
     elif isinstance(response_content, str):
+        logger.debug("extract_search_results: Input is string, attempting JSON parse")
         try:
             return json.loads(response_content)
         except json.JSONDecodeError as e:
@@ -270,8 +274,9 @@ def extract_search_results(response_content):
             return {"status": "error", "message": "Failed to parse search JSON string."}
     
     # Fallback
-    logger.warning(f"extract_search_results: Unhandled type: {type(response_content)}. Content: {str(response_content)[:200]}...")
-    return {"status": "error", "message": f"Search result was not a recognized format. Type: {type(response_content)}"}
+    else:
+        logger.error(f"extract_search_results: Unhandled type: {type(response_content)}. Content: {str(response_content)[:200]}...")
+        return {"status": "error", "message": f"Search result was not a recognized format. Type: {type(response_content)}"}
 
 
 def format_search_results_for_prompt(results_data, query, max_results=3):
@@ -387,29 +392,36 @@ async def process_chat_request(payload: ChatPayload) -> ChatResponse:
         else:
             logger.info(f"[API_CHAT] Search active for: '{user_msg_content}'")
             try:
-                req_id = submit_search_request(user_msg_content) # User's original query
-                mcp_resp = wait_for_response(req_id) # This is a dict from response_queue
+                req_id = submit_search_request(user_msg_content)
+                logger.debug(f"[API_CHAT] Submitted search request with ID: {req_id}")
+                
+                mcp_resp = wait_for_response(req_id, timeout=45) # Increased timeout
+                logger.debug(f"[API_CHAT] Received MCP response: {mcp_resp}")
 
                 if mcp_resp.get("status") == "error": 
+                    logger.error(f"[API_CHAT] MCP response indicates error: {mcp_resp.get('error')}")
                     raise Exception(mcp_resp.get("error", "MCP search tool returned an error status"))
                 
-                # mcp_resp["data"] is result.content from MCP, expected to be a dict
-                extracted_results_data = extract_search_results(mcp_resp.get("data")) 
+                # Log the raw data before extraction
+                raw_data = mcp_resp.get("data")
+                logger.debug(f"[API_CHAT] Raw search data type: {type(raw_data)}, content preview: {str(raw_data)[:500]}")
                 
-                if extracted_results_data.get("status") == "error": # Check if extract_search_results itself found an issue
+                extracted_results_data = extract_search_results(raw_data)
+                logger.debug(f"[API_CHAT] Extracted results: {extracted_results_data}")
+                
+                if extracted_results_data.get("status") == "error":
+                    logger.error(f"[API_CHAT] Extracted results indicate error: {extracted_results_data.get('message')}")
                     raise Exception(extracted_results_data.get("message", "Failed to extract or parse search results."))
                 
                 search_summary_text = format_search_results_for_prompt(extracted_results_data, user_msg_content)
+                logger.debug(f"[API_CHAT] Formatted search summary (first 200 chars): {search_summary_text[:200]}")
+                
                 search_html_indicator = f"<div class='search-indicator-custom'><b>🔍 Web Search:</b> Results for \"{user_msg_content}\" were used.</div>"
                 
-                # Construct the prompt for the LLM
                 prompt_llm = (f"Based on the following web search results for '{user_msg_content}':\n{search_summary_text}\n\n"
                               f"Please answer the user's original question: '{user_msg_content}'")
                 
-                # Update the stored user message's raw_content_for_llm to include the search context for future turns if needed
-                # This might make the raw_content_for_llm very long. Consider if this is the desired behavior.
-                # For now, we'll keep raw_content_for_llm as the original user message and prepend search results only for this turn's LLM call.
-                # The llm_history is built fresh each time from raw_content_for_llm, so this is fine.
+                logger.info(f"[API_CHAT] Search processing successful, enhanced prompt created")
 
             except Exception as e:
                 logger.error(f"[API_CHAT] Search processing error: {e}", exc_info=True)
