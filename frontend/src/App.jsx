@@ -51,14 +51,22 @@ const App = () => {
       setDbConnected(status.db_connected);
       if (!status.db_connected) { // If DB is not connected, reflect this in conversations error
         setConversationsError("Database not connected. History is unavailable.");
+      } else {
+        // If DB connection is restored, clear the specific "DB not connected" error
+        // to allow fetchConversationsList to proceed.
+        // fetchConversationsList will set its own error if the API call fails.
+        if (conversationsError === "Database not connected. History is unavailable.") {
+            setConversationsError(null);
+        }
       }
     } catch (err) {
-      setError('Failed to connect to backend services. Status polling stopped.');
+      // Error for main chat window, or a more general status error
+      // setError('Failed to connect to backend services. Status polling stopped.'); 
       setMcpServiceReady(false);
       setDbConnected(false);
       setConversationsError("Failed to fetch service status. History may be unavailable.");
     }
-  }, []);
+  }, [conversationsError]); // Added conversationsError to allow clearing it
 
   useEffect(() => {
     fetchServiceStatus();
@@ -67,22 +75,12 @@ const App = () => {
   }, [fetchServiceStatus]);
 
   const fetchConversationsList = useCallback(async () => {
-    if (!dbConnected) {
-      setConversations([]);
-      setIsConversationsLoading(false);
-      // conversationsError might be already set by fetchServiceStatus if db is not connected
-      if (!conversationsError) setConversationsError("Database not connected. History is unavailable.");
-      return;
-    }
+    // This function assumes dbConnected is true if it's called by the useEffect below.
     setIsConversationsLoading(true);
-    setConversationsError(null); // Clear previous error before trying again
+    setConversationsError(null); // Clear previous API call related error before trying again
     try {
       const convs = await getConversations();
       setConversations(convs || []);
-      if (!convs || convs.length === 0) {
-        // Optional: set a specific message if list is empty but no error, e.g. "No past conversations."
-        // This is handled in sidebar, but good to be aware of.
-      }
     } catch (err) {
       const errorDetail = err.detail || err.message || 'Failed to fetch conversations list.';
       setConversationsError(errorDetail);
@@ -90,23 +88,21 @@ const App = () => {
     } finally {
       setIsConversationsLoading(false);
     }
-  }, [dbConnected, conversationsError]); // Added conversationsError to dependencies to re-evaluate if it changes
+  }, []); // Removed dbConnected from here, as the calling effect handles the dbConnected logic
 
   useEffect(() => {
-    // Fetch conversations only if DB is connected.
-    // The fetchConversationsList callback itself checks dbConnected,
-    // but this condition here prevents an unnecessary call if dbConnected is false initially.
     if (dbConnected) {
         fetchConversationsList();
     } else {
-        // Ensure list is clear and loading is false if DB is not connected
+        // DB is not connected
         setConversations([]);
         setIsConversationsLoading(false);
-        if (!conversationsError) { // If no specific error yet, set the default one
+        // Set error only if not already a more specific error from fetchServiceStatus
+        if (conversationsError !== "Failed to fetch service status. History may be unavailable.") {
              setConversationsError("Database not connected. History is unavailable.");
         }
     }
-  }, [dbConnected, fetchConversationsList, conversationsError]);
+  }, [dbConnected, fetchConversationsList]); // Removed conversationsError from here
 
 
   useEffect(() => {
@@ -144,11 +140,12 @@ const App = () => {
       
       if (response.conversation_id && response.conversation_id !== currentConversationId) {
         setCurrentConversationId(response.conversation_id);
-        if (!currentConversationId || currentConversationId !== response.conversation_id) {
-            await fetchConversationsList(); 
-        }
+        // If a new conversation was created or ID changed, refresh list
+        // No need to check currentConversationId here, just refresh if ID is new to this component instance
+        await fetchConversationsList(); 
       } else if (!response.conversation_id && currentConversationId) {
-        setCurrentConversationId(null); // Should not happen ideally
+        // This case should ideally not happen if backend always returns a conversation_id
+        setCurrentConversationId(null);
         await fetchConversationsList();
       } else if (response.conversation_id === currentConversationId) {
         // If message sent in existing conversation, refresh list to update its timestamp/message_count
@@ -174,7 +171,6 @@ const App = () => {
     setChatHistory([initialWelcomeMessage]); 
     setIsSearchActive(false); 
     setError(null); // Clear general error
-    // conversationsError remains as is, should not be affected by starting a new chat UI-wise
   };
 
   const toggleSearch = () => {
