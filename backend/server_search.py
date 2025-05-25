@@ -2,29 +2,39 @@
 import os
 import json
 import asyncio
-from dotenv import load_dotenv
+from dotenv import load_dotenv, find_dotenv # Import find_dotenv
 import httpx
 from mcp.server.fastmcp import FastMCP
 import logging # Import standard logging
 
-# Load environment variables from .env file
-load_dotenv()
-
-SERPER_API_KEY = os.getenv("SERPER_API_KEY")
-if not SERPER_API_KEY:
-    # Use logging for this critical error before mcp.logger might be available
-    logging.critical("SERPER_API_KEY environment variable not set. Please create a .env file with your key.")
-    raise ValueError("SERPER_API_KEY environment variable not set. Please create a .env file with your key.")
-
-SERPER_API_URL = "https://google.serper.dev/search"
-
 # Create an MCP server instance using FastMCP
+# Initialize mcp instance early so mcp.logger is available for dotenv loading messages
 mcp = FastMCP(
     name="WebSearchServer",
     version="0.1.0",
     display_name="Web Search Server (Serper.dev)",
     description="Provides web search functionality via the Serper.dev API."
 )
+
+# Load environment variables from .env file
+# Make .env loading more robust: search from script directory upwards
+dotenv_path = find_dotenv(usecwd=False, raise_error_if_not_found=False)
+if dotenv_path:
+    mcp.logger.info(f"Loading .env file from: {dotenv_path}")
+    load_dotenv(dotenv_path)
+else:
+    mcp.logger.warning("No .env file found by find_dotenv(). Relying on default load_dotenv() behavior or existing environment variables.")
+    load_dotenv() # Try default behavior (e.g. CWD)
+
+SERPER_API_KEY = os.getenv("SERPER_API_KEY")
+if not SERPER_API_KEY:
+    # Use mcp.logger now that it's initialized
+    mcp.logger.critical("SERPER_API_KEY environment variable not set. Please ensure it's in your .env file or environment.")
+    # Raising an error here will cause the script to exit, which should be caught by main.py if stderr is monitored.
+    raise ValueError("SERPER_API_KEY environment variable not set. Please create a .env file with your key or set it in the environment.")
+
+SERPER_API_URL = "https://google.serper.dev/search"
+
 
 # Register an asynchronous tool for performing web searches
 @mcp.tool()
@@ -99,12 +109,10 @@ async def web_search(query: str) -> dict:
         }
 
 if __name__ == "__main__":
-    # FastMCP will set up its own logger, which is accessible via mcp.logger
-    # The initial print statement is replaced by a log after mcp instance is created.
-    mcp.logger.info("Starting Web Search MCP Server...")
+    mcp.logger.info("Starting Web Search MCP Server (server_search.py)...")
     try:
         mcp.run()
-    except Exception as e:
-        mcp.logger.exception("Web Search MCP Server crashed.")
+    except Exception as e: # Catch exceptions during mcp.run() itself, e.g., if port is blocked (not relevant for stdio)
+        mcp.logger.exception("Web Search MCP Server (server_search.py) crashed during run.")
     finally:
-        mcp.logger.info("Web Search MCP Server stopped.")
+        mcp.logger.info("Web Search MCP Server (server_search.py) stopped.")
