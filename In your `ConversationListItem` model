@@ -1,0 +1,6 @@
+class ConversationListItem(BaseModel):
+    id: str = Field(alias="_id")
+    # ... other fields
+    class Config:
+        populate_by_name = True
+        # ...

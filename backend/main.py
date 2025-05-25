@@ -283,21 +283,23 @@ async def process_chat_request(payload: ChatPayload) -> ChatResponse:
         assistant_chat_message = ChatMessage(role="assistant", content=assistant_response_content)
         ui_messages_for_response.append(assistant_chat_message)
         
-        if conversation_id:
-            conversations_collection.update_one(
-                {"_id": ObjectId(conversation_id)},
-                {
-                    "$push": {"messages": {"$each": [
-                        user_chat_message.model_dump(exclude_none=True),
-                        assistant_chat_message.model_dump(exclude_none=True)
-                    ]}},
-                    "$set": {"updated_at": datetime.now(timezone.utc)}
-                }
-            )
+        if conversation_id: # Should always be true here if we just created one or had one
+            conv_object_id_for_clear = ObjectId(conversation_id) if ObjectId.is_valid(conversation_id) else None
+            if conv_object_id_for_clear:
+                conversations_collection.update_one(
+                    {"_id": conv_object_id_for_clear},
+                    {
+                        "$push": {"messages": {"$each": [
+                            user_chat_message.model_dump(exclude_none=True),
+                            assistant_chat_message.model_dump(exclude_none=True)
+                        ]}},
+                        "$set": {"updated_at": datetime.now(timezone.utc)}
+                    }
+                )
         return ChatResponse(conversation_id=conversation_id, chat_history=ui_messages_for_response)
 
     prompt_for_llm = user_message_content
-    raw_content_for_llm_user_message = user_message_content 
+    # raw_content_for_llm_user_message = user_message_content # This variable was unused
     search_performed_indicator_html = None
 
     if payload.use_search and app_state.service_ready:
@@ -329,10 +331,12 @@ async def process_chat_request(payload: ChatPayload) -> ChatResponse:
     user_message_to_save_dict["raw_content_for_llm"] = prompt_for_llm 
 
     if conversation_id: 
-        conversations_collection.update_one(
-            {"_id": ObjectId(conversation_id)},
-            {"$push": {"messages": user_message_to_save_dict}, "$set": {"updated_at": datetime.now(timezone.utc)}}
-        )
+        conv_object_id_for_user_msg = ObjectId(conversation_id) if ObjectId.is_valid(conversation_id) else None
+        if conv_object_id_for_user_msg:
+            conversations_collection.update_one(
+                {"_id": conv_object_id_for_user_msg},
+                {"$push": {"messages": user_message_to_save_dict}, "$set": {"updated_at": datetime.now(timezone.utc)}}
+            )
 
     model_response_content = await chat_with_ollama(llm_conversation_history)
 
@@ -352,10 +356,12 @@ async def process_chat_request(payload: ChatPayload) -> ChatResponse:
         assistant_message_to_save_dict["raw_content_for_llm"] = model_response_content
 
         if conversation_id:
-            conversations_collection.update_one(
-                {"_id": ObjectId(conversation_id)},
-                {"$push": {"messages": assistant_message_to_save_dict}, "$set": {"updated_at": datetime.now(timezone.utc)}}
-            )
+            conv_object_id_for_assistant_msg = ObjectId(conversation_id) if ObjectId.is_valid(conversation_id) else None
+            if conv_object_id_for_assistant_msg:
+                conversations_collection.update_one(
+                    {"_id": conv_object_id_for_assistant_msg},
+                    {"$push": {"messages": assistant_message_to_save_dict}, "$set": {"updated_at": datetime.now(timezone.utc)}}
+                )
     else:
         err_msg_content = "Sorry, I couldn't generate a response."
         error_chat_message = ChatMessage(role="assistant", content=err_msg_content)
@@ -389,17 +395,25 @@ async def list_conversations():
         ).sort("updated_at", -1).limit(50) 
         
         conversation_list = []
-        for conv_data in convs_cursor:
+        for conv_data_from_db in convs_cursor:
             # N+1 query pattern for message_count. For production, consider:
             # 1. Storing message_count on the conversation document and updating it with $inc.
             # 2. Using a MongoDB aggregation pipeline to calculate counts efficiently.
-            full_conv_doc = conversations_collection.find_one({"_id": conv_data["_id"]}, {"messages": 1})
+            full_conv_doc = conversations_collection.find_one({"_id": conv_data_from_db["_id"]}, {"messages": 1})
             message_count = len(full_conv_doc.get("messages", [])) if full_conv_doc else 0
             
+            # Prepare data for Pydantic validation.
+            # The ConversationListItem model expects 'id' (string) aliased as '_id'.
+            # We explicitly convert ObjectId to string for the '_id' key in the input dict.
+            item_data_for_validation = dict(conv_data_from_db) # Create a mutable copy
+            if "_id" in item_data_for_validation and isinstance(item_data_for_validation["_id"], ObjectId):
+                item_data_for_validation["_id"] = str(item_data_for_validation["_id"])
+            
+            item_data_for_validation["message_count"] = message_count
+            
             # Pydantic will use the alias "_id" for "id" field upon validation.
-            # Ensure all fields required by ConversationListItem are present in conv_data or defaulted.
-            conv_item_data = {**conv_data, "message_count": message_count}
-            conversation_list.append(ConversationListItem.model_validate(conv_item_data))
+            # Default for 'title' will be applied by Pydantic if not present.
+            conversation_list.append(ConversationListItem.model_validate(item_data_for_validation))
         return conversation_list
     except Exception as e:
         logger.error(f"Error listing conversations: {e}", exc_info=True)
