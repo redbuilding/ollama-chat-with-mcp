@@ -10,14 +10,6 @@ const ConversationSidebar = ({
   dbConnected,
   conversationsError,
 }) => {
-  console.log('[ConversationSidebar Render] Props received:', {
-    conversationsCount: conversations ? conversations.length : 0,
-    currentConversationId,
-    isLoading,
-    dbConnected,
-    conversationsError,
-  });
-
   const formatDate = (isoString) => {
     if (!isoString) return '';
     return new Date(isoString).toLocaleDateString(undefined, {
@@ -40,7 +32,6 @@ const ConversationSidebar = ({
       {isLoading && (
         <div className="flex items-center justify-center py-4">
           <Loader2 size={24} className="animate-spin text-brand-purple" />
-          {console.log('[ConversationSidebar Render] Displaying Loading Spinner.')}
         </div>
       )}
 
@@ -48,28 +39,23 @@ const ConversationSidebar = ({
         <div className="text-xs text-brand-alert-red p-2 rounded bg-red-900/30 mb-2 flex items-start">
           <AlertTriangle size={16} className="mr-2 flex-shrink-0 mt-0.5" /> 
           <span>Error: {conversationsError}</span>
-          {console.log(`[ConversationSidebar Render] Displaying conversationsError: "${conversationsError}"`)}
         </div>
       )}
 
       {!isLoading && !conversationsError && dbConnected && conversations.length === 0 && (
         <p className="text-xs text-brand-text-secondary px-2">
           No past conversations.
-          {console.log('[ConversationSidebar Render] Displaying "No past conversations."')}
         </p>
       )}
 
       <div className="flex-grow overflow-y-auto space-y-1 pr-1 -mr-1">
         {!isLoading && !conversationsError && dbConnected &&
-          (console.log('[ConversationSidebar Render] Attempting to map conversations. Count:', conversations.length),
           conversations
             .filter(conv => {
               const isValid = conv && typeof conv.id === 'string' && conv.id.trim() !== '';
-              if (!isValid) console.warn('[ConversationSidebar Filter] Filtering out invalid conversation:', conv);
               return isValid;
             }) 
             .map((conv) => {
-              console.log(`[ConversationSidebar Map] Rendering conversation button for ID: ${conv.id}`);
               return (
                 <button
                   key={conv.id} 
@@ -92,7 +78,7 @@ const ConversationSidebar = ({
                   </div>
                 </button>
               );
-            }))}
+            })}
       </div>
     </div>
   );
