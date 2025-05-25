@@ -2,23 +2,22 @@
 import os
 import json
 import asyncio
-from dotenv import load_dotenv, find_dotenv # Import find_dotenv
+from dotenv import load_dotenv, find_dotenv 
 import httpx
 from mcp.server.fastmcp import FastMCP
-import logging # Import standard logging
-import sys # Import the sys module
+from mcp.transport.tcp import TCPTransportConfiguration # Import TCP transport
+import logging 
+import sys 
 
 # Get a logger for this module specifically for setup and script-level messages
-script_logger = logging.getLogger("server_search_script")
-# Configure logger to output to stderr at INFO level by default.
-# This ensures its messages are sent to stderr when run as a subprocess.
+script_logger = logging.getLogger("server_search_tcp_script") # Renamed logger for clarity
 script_logger.setLevel(logging.INFO)
-if not script_logger.hasHandlers(): # Add a handler if none are configured (e.g., when not run as __main__)
-    stderr_handler = logging.StreamHandler(sys.stderr) # Ensure output to stderr
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - [SERVER_SEARCH_PY] %(message)s') # Add prefix
+if not script_logger.hasHandlers(): 
+    stderr_handler = logging.StreamHandler(sys.stderr) 
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - [SERVER_SEARCH_TCP] %(message)s') 
     stderr_handler.setFormatter(formatter)
     script_logger.addHandler(stderr_handler)
-    script_logger.propagate = False # Prevent duplicate logging if root logger also has handlers
+    script_logger.propagate = False 
 
 script_logger.info(f"Script starting. Python Executable: {sys.executable}")
 script_logger.info(f"Python sys.path: {sys.path}")
@@ -26,15 +25,22 @@ script_logger.info(f"Current Working Directory (CWD): {os.getcwd()}")
 script_logger.info(f"File __file__: {__file__}")
 script_logger.info(f"Absolute path of __file__: {os.path.abspath(__file__)}")
 
+# Define TCP server host and port
+TCP_HOST = "localhost"
+TCP_PORT = 9000 # You can choose a different port if needed
 
 # Create an MCP server instance using FastMCP
+# Configure it to use TCP transport
 mcp = FastMCP(
-    name="WebSearchServer",
+    name="WebSearchTCPServer", # Renamed for clarity
     version="0.1.0",
-    display_name="Web Search Server (Serper.dev)",
-    description="Provides web search functionality via the Serper.dev API."
+    display_name="Web Search Server (Serper.dev via TCP)",
+    description="Provides web search functionality via the Serper.dev API over TCP.",
+    transports=[
+        TCPTransportConfiguration(host=TCP_HOST, port=TCP_PORT)
+    ]
 )
-script_logger.info("FastMCP instance created.")
+script_logger.info(f"FastMCP instance created, configured for TCP on {TCP_HOST}:{TCP_PORT}.")
 
 # Load environment variables from .env file
 dotenv_path = find_dotenv(usecwd=False, raise_error_if_not_found=False)
@@ -46,7 +52,7 @@ else:
     load_dotenv() 
 
 SERPER_API_KEY = os.getenv("SERPER_API_KEY")
-if SERPER_API_KEY and len(SERPER_API_KEY) > 5 : # Basic check if key looks somewhat valid
+if SERPER_API_KEY and len(SERPER_API_KEY) > 5 : 
     script_logger.info(f"SERPER_API_KEY found (length: {len(SERPER_API_KEY)}).")
 else:
     script_logger.critical(f"SERPER_API_KEY environment variable NOT FOUND or is too short (length: {len(SERPER_API_KEY) if SERPER_API_KEY else 0}). This script will now raise ValueError.")
@@ -68,9 +74,8 @@ async def web_search(query: str) -> dict:
     Returns:
         A standardized dictionary containing search results or error information
     """
-    # Inside the tool, mcp.logger is expected to be available and configured by the MCP framework.
     if not query:
-        mcp.logger.warning("web_search called with empty query.")
+        mcp.logger.warning("web_search called with empty query.") # mcp.logger is fine inside tools
         return {
             "status": "error",
             "message": "Missing required parameter 'query' for web_search tool.",
@@ -115,17 +120,15 @@ async def web_search(query: str) -> dict:
 script_logger.info("web_search tool defined.")
 
 if __name__ == "__main__":
-    # If run directly, ensure basicConfig is called if not already by the script_logger setup
-    # This basicConfig might not be hit if the script_logger already added a handler.
     if not logging.getLogger().hasHandlers() and not script_logger.hasHandlers():
-        logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - [SERVER_SEARCH_PY __main__] %(message)s')
+        logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - [SERVER_SEARCH_TCP __main__] %(message)s')
     
-    script_logger.info("Attempting to start mcp.run() directly...")
+    script_logger.info(f"Attempting to start MCP TCP server on {TCP_HOST}:{TCP_PORT}...")
     try:
-        mcp.run()
+        mcp.run() # This will now start the TCP server based on FastMCP config
     except Exception as e: 
-        script_logger.exception("mcp.run() crashed when called directly.")
+        script_logger.exception("MCP TCP server crashed during run.")
     finally:
-        script_logger.info("mcp.run() (called directly) finished or crashed.")
+        script_logger.info("MCP TCP server finished or crashed.")
 else:
-    script_logger.info("Script is NOT being run as __main__. mcp.run() will likely be called by an importer if this is an MCP server.")
+    script_logger.info("Script is NOT being run as __main__. If this is the MCP server, it needs to be run directly.")

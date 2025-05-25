@@ -18,23 +18,23 @@ from bson import ObjectId
 from pymongo import MongoClient
 from pymongo.errors import ConnectionFailure, OperationFailure
 
-from mcp import ClientSession, StdioServerParameters, types # Import types for MCPError
-from mcp.client.stdio import stdio_client
-import ollama # Ensure ollama is imported
+from mcp import ClientSession, types # Import types for MCPError
+from mcp.client.tcp import TCPClientTransport # Import TCP client transport
+import ollama 
 import time 
 import queue
 
 # --- Environment Setup ---
-MCP_SERVER_SCRIPT = "server_search.py"
-_main_py_dir = os.path.dirname(os.path.abspath(__file__)) # Directory of main.py (backend)
-MCP_SERVER_SCRIPT_ABS_PATH = os.path.join(_main_py_dir, MCP_SERVER_SCRIPT)
-PROJECT_ROOT_DIR = os.path.dirname(_main_py_dir) # Parent directory of backend (e.g., /Users/qasim/Documents/ai/mcp)
+# MCP_SERVER_SCRIPT = "server_search.py" # No longer launching script directly
+# _main_py_dir = os.path.dirname(os.path.abspath(__file__)) 
+# MCP_SERVER_SCRIPT_ABS_PATH = os.path.join(_main_py_dir, MCP_SERVER_SCRIPT)
+# PROJECT_ROOT_DIR = os.path.dirname(_main_py_dir) 
 
-if not os.path.exists(MCP_SERVER_SCRIPT_ABS_PATH):
-    logging.error(f"CRITICAL: MCP server script '{MCP_SERVER_SCRIPT_ABS_PATH}' not found. Searched in directory: '{_main_py_dir}'. Search functionality will be disabled.")
-else:
-    logging.info(f"MCP server script found at: {MCP_SERVER_SCRIPT_ABS_PATH}")
-logging.info(f"Project root directory determined as: {PROJECT_ROOT_DIR}")
+# Configuration for connecting to the separate MCP TCP server
+MCP_SERVER_HOST = "localhost"
+MCP_SERVER_PORT = 9000 # Must match the port server_search.py listens on
+
+logging.info(f"MCP Client will attempt to connect to TCP server at {MCP_SERVER_HOST}:{MCP_SERVER_PORT}")
 
 
 os.makedirs('logs', exist_ok=True)
@@ -89,41 +89,22 @@ app_state = AppState()
 
 # --- MCP Service ---
 async def mcp_service_loop():
-    logger.info("MCP_SERVICE_LOOP: Starting...")
-    if not os.path.exists(MCP_SERVER_SCRIPT_ABS_PATH):
-        logger.error(f"MCP_SERVICE_LOOP: MCP service cannot start: script '{MCP_SERVER_SCRIPT_ABS_PATH}' not found.")
-        app_state.service_ready = False
-        return
-
+    logger.info("MCP_SERVICE_LOOP: Starting TCP client loop...")
+    
     mcp_client_comms_logger = logger.getChild("mcp_client_comms")
     mcp_client_comms_logger.setLevel(logging.DEBUG) 
 
-    server_script_dir = os.path.dirname(MCP_SERVER_SCRIPT_ABS_PATH) 
-
-    # Prepare environment for the subprocess
-    subproc_env = os.environ.copy()
-    # Prepend project root to PYTHONPATH to help find project-local 'mcp' library
-    existing_pythonpath = subproc_env.get("PYTHONPATH")
-    new_pythonpath = PROJECT_ROOT_DIR
-    if existing_pythonpath:
-        new_pythonpath = f"{PROJECT_ROOT_DIR}{os.pathsep}{existing_pythonpath}"
-    subproc_env["PYTHONPATH"] = new_pythonpath
-    logger.info(f"MCP_SERVICE_LOOP: Subprocess PYTHONPATH set to: {new_pythonpath}")
-
-
     while True: 
         try:
-            logger.info(f"MCP_SERVICE_LOOP: Setting CWD for subprocess to: {server_script_dir}")
-            server_params_for_client = StdioServerParameters(
-                command=sys.executable, 
-                args=[MCP_SERVER_SCRIPT_ABS_PATH], 
-                env=subproc_env, # Pass the modified environment
-                cwd=server_script_dir 
+            transport = TCPClientTransport(
+                host=MCP_SERVER_HOST, 
+                port=MCP_SERVER_PORT, 
+                logger=mcp_client_comms_logger
             )
-            logger.info(f"MCP_SERVICE_LOOP: Attempting to start MCP server using stdio_client with: command='{sys.executable}', args=['{MCP_SERVER_SCRIPT_ABS_PATH}'], cwd='{server_script_dir}'")
+            logger.info(f"MCP_SERVICE_LOOP: Attempting to connect to MCP TCP server at {MCP_SERVER_HOST}:{MCP_SERVER_PORT}...")
             
-            async with stdio_client(server_params_for_client, logger=mcp_client_comms_logger) as (read, write):
-                logger.info("MCP_SERVICE_LOOP: stdio_client context entered (implies subprocess started and pipes connected). Initializing ClientSession...")
+            async with transport.connect() as (read, write): # transport.connect() is the async context manager
+                logger.info(f"MCP_SERVICE_LOOP: Successfully connected to MCP TCP server at {MCP_SERVER_HOST}:{MCP_SERVER_PORT}. Initializing ClientSession...")
                 async with ClientSession(read, write) as session:
                     logger.info("MCP_SERVICE_LOOP: ClientSession created. Calling session.initialize()...")
                     await session.initialize() 
@@ -163,16 +144,16 @@ async def mcp_service_loop():
                             await asyncio.sleep(0.1) 
         
         except ConnectionRefusedError as e_conn_refused: 
-            logger.error(f"MCP_SERVICE_LOOP: ConnectionRefusedError (unexpected for stdio): {e_conn_refused}", exc_info=True) 
+            logger.error(f"MCP_SERVICE_LOOP: ConnectionRefusedError connecting to {MCP_SERVER_HOST}:{MCP_SERVER_PORT}. Is the MCP server running? Error: {e_conn_refused}", exc_info=True) 
         except asyncio.TimeoutError as e_timeout: 
-            logger.error(f"MCP_SERVICE_LOOP: TimeoutError in MCP service communication: {e_timeout}", exc_info=True)
+            logger.error(f"MCP_SERVICE_LOOP: TimeoutError in MCP service communication with {MCP_SERVER_HOST}:{MCP_SERVER_PORT}: {e_timeout}", exc_info=True)
         except types.MCPError as e_mcp_protocol: 
-            logger.error(f"MCP_SERVICE_LOOP: MCPError (protocol error): {e_mcp_protocol}", exc_info=True)
+            logger.error(f"MCP_SERVICE_LOOP: MCPError (protocol error) with {MCP_SERVER_HOST}:{MCP_SERVER_PORT}: {e_mcp_protocol}", exc_info=True)
         except Exception as e_generic: 
-            logger.error(f"MCP_SERVICE_LOOP: Generic Exception during MCP service setup/connection: {e_generic}", exc_info=True) 
+            logger.error(f"MCP_SERVICE_LOOP: Generic Exception during MCP service connection/operation with {MCP_SERVER_HOST}:{MCP_SERVER_PORT}: {e_generic}", exc_info=True) 
         finally:
             app_state.service_ready = False 
-            logger.info("MCP_SERVICE_LOOP: Connection lost or failed. Will attempt to reconnect after a 10s delay.")
+            logger.info(f"MCP_SERVICE_LOOP: Connection to {MCP_SERVER_HOST}:{MCP_SERVER_PORT} lost or failed. Will attempt to reconnect after a 10s delay.")
             await asyncio.sleep(10) 
 
 
@@ -181,7 +162,7 @@ async def mcp_service_loop():
 async def lifespan(app: FastAPI):
     logger.info("FastAPI Lifespan: Startup sequence initiated.")
     app_state.mcp_task = asyncio.create_task(mcp_service_loop())
-    logger.info("FastAPI Lifespan: MCP service task created.")
+    logger.info("FastAPI Lifespan: MCP service client task created.")
     yield 
     logger.info("FastAPI Lifespan: Shutdown sequence initiated.")
     if app_state.mcp_task:
@@ -189,9 +170,9 @@ async def lifespan(app: FastAPI):
         try:
             await app_state.mcp_task
         except asyncio.CancelledError:
-            logger.info("FastAPI Lifespan: MCP service task successfully cancelled.")
+            logger.info("FastAPI Lifespan: MCP service client task successfully cancelled.")
         except Exception as e:
-            logger.error(f"FastAPI Lifespan: Error during MCP service task shutdown: {e}", exc_info=True)
+            logger.error(f"FastAPI Lifespan: Error during MCP service client task shutdown: {e}", exc_info=True)
     if mongo_client:
         mongo_client.close()
         logger.info("FastAPI Lifespan: MongoDB connection closed.")
