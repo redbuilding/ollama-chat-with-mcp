@@ -5,10 +5,12 @@ from mysql.connector import Error
 import json
 import re
 from typing import Dict, Union, List
-from mcp.server.fastmcp import FastMCP, mcp
+from mcp.server.fastmcp import FastMCP
+from dotenv import load_dotenv
+load_dotenv()
 
 # Initialize MCP Server
-mcp_server = FastMCP(name="MySQLChatServer")
+server = FastMCP(name="MySQLChatServer")
 
 # --- Database Configuration ---
 # Replace with your actual database credentials
@@ -129,7 +131,7 @@ def is_safe_query(query: str) -> bool:
     return True
 
 # --- MCP Tool: Execute SQL Query ---
-@mcp.tool()
+@server.tool()
 def execute_sql_query_tool(query: str) -> str:
     """
     Executes a read-only SQL SELECT query against the database and returns the results as a JSON string.
@@ -188,7 +190,7 @@ def get_table_names(connection) -> Union[List[str], Dict]:
             # print("Database connection closed after getting tables.", file=sys.stderr)
 
 
-@mcp.resource("tables")
+@server.resource("resource://tables")
 def get_tables() -> str:
     """
     Provides a list of table names in the database as a JSON string.
@@ -243,7 +245,7 @@ def get_table_schema(connection, table_name: str) -> Union[List[Dict], Dict]:
             # print(f"Database connection closed after getting schema for {table_name}.", file=sys.stderr)
 
 
-@mcp.resource("tables/{table_name}/schema")
+@server.resource("resource://tables/{table_name}/schema")
 def get_table_schema_resource(table_name: str) -> str:
     """
     Provides the schema (columns, types, etc.) for a specific table
@@ -280,5 +282,5 @@ if __name__ == "__main__":
     from decimal import Decimal
     print("Starting MCP server for MySQL database interaction...", file=sys.stderr)
     # Run the server using standard I/O transport
-    mcp_server.run(transport="stdio")
+    server.run(transport="stdio")
     print("MCP server stopped.", file=sys.stderr)
