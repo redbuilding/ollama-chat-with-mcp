@@ -27,7 +27,7 @@ from fastmcp.client.transports import StdioServerParameters, stdio_client
 # from mcp.common.content import TextContent # For type checking if needed
 
 import ollama
-import asyncio
+# import asyncio # Duplicate import, removed for cleanliness
 
 # --- Environment Setup ---
 _main_py_dir = os.path.dirname(os.path.abspath(__file__))
@@ -806,17 +806,20 @@ else:
 
 # --- Main Execution ---
 if __name__ == "__main__":
-    logger.info(f"Starting Uvicorn for {__name__}. MCP services startup handled by FastAPI's lifespan manager.")
+    logger.info(f"Starting Uvicorn for {__name__} when script is run directly. MCP services startup handled by FastAPI's lifespan manager.")
     
-    def graceful_shutdown_handler(sig, frame):
-        logger.info(f"Signal {signal.Signals(sig).name} received, initiating graceful shutdown via Uvicorn...")
-        # Uvicorn should handle the lifespan shutdown, which cancels our tasks.
-        # Forcing sys.exit might bypass Uvicorn's graceful shutdown.
-        # Let Uvicorn handle it. If issues, may need more direct control.
-        # sys.exit(0) # Potentially too abrupt
+    # Define signal handlers here if they are specific to direct script execution
+    # and not already handled by Uvicorn's own signal handling when `reload=True`.
+    # For simplicity with `reload=True`, Uvicorn's default signal handling is often sufficient.
+    # def graceful_shutdown_handler(sig, frame):
+    #     logger.info(f"Signal {signal.Signals(sig).name} received, Uvicorn's reloader should handle shutdown.")
+    # signal.signal(signal.SIGINT, graceful_shutdown_handler)
+    # signal.signal(signal.SIGTERM, graceful_shutdown_handler)
     
-    signal.signal(signal.SIGINT, graceful_shutdown_handler)
-    signal.signal(signal.SIGTERM, graceful_shutdown_handler)
-    
-    uvicorn.run(app, host="127.0.0.1", port=8000, log_level="info")
-
+    uvicorn.run(
+        "main:app",  # Use the "module:variable" string format for app
+        host="127.0.0.1",
+        port=8000,
+        log_level="info",
+        reload=True  # Enable Uvicorn's reloader
+    )
