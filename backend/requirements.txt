@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+pydantic
+pymongo
+ollama
+mysql-connector-python
+python-dotenv
+httpx
+mcp
+fastmcp
