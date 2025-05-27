@@ -149,14 +149,14 @@ async def run_mcp_service_instance(config: MCPServiceConfig):
                     logger.info(f"MCP_SERVICE ({service_name}): ClientSession created. Initializing session...")
                     await session.initialize()
                     logger.info(f"MCP_SERVICE ({service_name}): Session initialized. Listing tools...")
-                    
+
                     tools_response = await session.list_tools()
                     logger.debug(f"MCP_SERVICE ({service_name}): Raw tools_response: {tools_response!r}")
 
                     if tools_response and tools_response.tools is not None:
                         available_tool_names = [tool.name for tool in tools_response.tools]
                         logger.info(f"MCP_SERVICE ({service_name}): Available tools: {available_tool_names}")
-                        
+
                         all_required_found = True
                         if config.required_tools: # Check required tools for basic service health
                             for req_tool in config.required_tools:
@@ -164,7 +164,7 @@ async def run_mcp_service_instance(config: MCPServiceConfig):
                                     logger.error(f"MCP_SERVICE ({service_name}): CRITICAL: Required tool '{req_tool}' NOT FOUND. Available: {available_tool_names}")
                                     all_required_found = False
                                     break
-                        
+
                         if all_required_found:
                             app_state.mcp_service_ready[service_name] = True
                             logger.info(f"MCP_SERVICE ({service_name}): Service fully initialized and all required tools are available.")
@@ -192,16 +192,28 @@ async def run_mcp_service_instance(config: MCPServiceConfig):
                                         logger.info(f"MCP_SERVICE ({service_name}): TOOL '{tool_to_call}' completed in {duration:.2f}s (req_id: {request_id})")
                                         logger.debug(f"MCP_SERVICE ({service_name}): TOOL '{tool_to_call}' result content type: {type(result.content)}. Content preview: {str(result.content)[:200]}")
                                         await response_q.put({"id": request_id, "status": "success", "data": result.content})
-                                    
+
                                     elif request_type == "resource":
                                         uri_to_get = request_data["uri"]
                                         logger.debug(f"MCP_SERVICE ({service_name}): Getting RESOURCE '{uri_to_get}' (req_id: {request_id})")
-                                        resource_content = await session.get_resource_content(uri_to_get) # Changed: Use uri_to_get directly
+                                        resource_result = await session.read_resource(uri_to_get) # Changed: Use uri_to_get directly
                                         duration = time.time() - start_time
                                         logger.info(f"MCP_SERVICE ({service_name}): RESOURCE '{uri_to_get}' completed in {duration:.2f}s (req_id: {request_id})")
-                                        logger.debug(f"MCP_SERVICE ({service_name}): RESOURCE '{uri_to_get}' result content type: {type(resource_content)}. Content preview: {str(resource_content)[:200]}")
-                                        # get_resource_content directly returns the content (e.g., a string)
+                                        logger.debug(f"MCP_SERVICE ({service_name}): RESOURCE '{uri_to_get}' result type: {type(resource_result)}. Content preview: {str(resource_result)[:200]}")
+
+                                        # Extract content from the response object
+                                        if hasattr(resource_result, 'contents') and resource_result.contents:
+                                            # MCP read_resource typically returns an object with a 'contents' list
+                                            resource_content = resource_result.contents[0].text if resource_result.contents[0].text else str(resource_result.contents[0])
+                                        elif hasattr(resource_result, 'content'):
+                                            # Alternative structure
+                                            resource_content = resource_result.content
+                                        else:
+                                            # Fallback - return the whole result
+                                            resource_content = str(resource_result)
+
                                         await response_q.put({"id": request_id, "status": "success", "data": resource_content})
+
                                     else:
                                         logger.error(f"MCP_SERVICE ({service_name}): Unknown request type '{request_type}' (req_id: {request_id})")
                                         await response_q.put({"id": request_id, "status": "error", "error": f"Unknown request type: {request_type}"})
@@ -233,7 +245,7 @@ async def run_mcp_service_instance(config: MCPServiceConfig):
 async def submit_mcp_tool_request(service_name: str, tool_name: str, params: Dict, request_id_prefix: str = "tool_req") -> str:
     if service_name not in app_state.mcp_service_queues:
         raise HTTPException(status_code=503, detail=f"MCP service '{service_name}' is not available or queues not initialized.")
-    
+
     request_q, _ = app_state.mcp_service_queues[service_name]
     request_id = f"{request_id_prefix}_{service_name}_{tool_name}_{time.time()}"
     await request_q.put({"id": request_id, "type": "tool", "tool": tool_name, "params": params})
@@ -242,7 +254,7 @@ async def submit_mcp_tool_request(service_name: str, tool_name: str, params: Dic
 async def submit_mcp_resource_request(service_name: str, resource_uri: str, request_id_prefix: str = "res_req") -> str:
     if service_name not in app_state.mcp_service_queues:
         raise HTTPException(status_code=503, detail=f"MCP service '{service_name}' is not available or queues not initialized.")
-    
+
     request_q, _ = app_state.mcp_service_queues[service_name]
     # Sanitize URI for request_id to avoid issues if URI has special chars, though time.time() makes it unique
     safe_uri_part = re.sub(r'[^a-zA-Z0-9_-]', '', resource_uri.split("://")[-1]) # Basic sanitization
@@ -265,10 +277,10 @@ async def wait_mcp_response(service_name: str, request_id: str, timeout: int = 4
                     return item
                 else:
                     logger.warning(f"MCP_RESPONSE_WAIT ({service_name}): Received item for unexpected ID {item.get('id')}, expected {request_id}. Re-queuing.")
-                    await response_q.put(item) 
-            except asyncio.TimeoutError: 
-                pass 
-            except asyncio.QueueEmpty: 
+                    await response_q.put(item)
+            except asyncio.TimeoutError:
+                pass
+            except asyncio.QueueEmpty:
                 pass
     except Exception as e:
         logger.error(f"MCP_RESPONSE_WAIT ({service_name}): Error waiting for response for {request_id}: {e}", exc_info=True)
@@ -305,7 +317,7 @@ async def lifespan(app: FastAPI):
                 logger.info(f"FastAPI Lifespan: MCP service task for '{service_name}' successfully cancelled.")
             except Exception as e:
                 logger.error(f"FastAPI Lifespan: Error during MCP service task '{service_name}' shutdown: {e}", exc_info=True)
-    
+
     if mongo_client:
         mongo_client.close()
         logger.info("FastAPI Lifespan: MongoDB connection closed.")
@@ -341,7 +353,7 @@ def extract_search_results(response_content: Any) -> Dict:
     # This function is generally for parsing JSON content that might come from MCP tools/resources
     logger.debug(f"extract_search_results: Input type: {type(response_content)}, content preview: {str(response_content)[:200]}")
     if isinstance(response_content, dict): return response_content # Already a dict
-    
+
     # If response_content is a string (likely JSON from a resource or TextContent)
     if isinstance(response_content, str):
         try: return json.loads(response_content)
@@ -355,7 +367,7 @@ def extract_search_results(response_content: Any) -> Dict:
         except json.JSONDecodeError:
             logger.error(f"extract_search_results: Failed to decode JSON from TextContent's text attribute: {response_content.text[:200]}")
             return {"status": "error", "message": "Result had .text attribute but it was not valid JSON."}
-            
+
     # Handling for lists that might contain TextContent (less common for direct resource calls)
     if isinstance(response_content, list) and len(response_content) > 0:
         item = response_content[0]
@@ -365,7 +377,7 @@ def extract_search_results(response_content: Any) -> Dict:
             except json.JSONDecodeError:
                 logger.error(f"extract_search_results: Failed to decode JSON from list's first item's .text: {item.text[:200]}")
                 return {"status": "error", "message": "Result was a list, first item's .text not valid JSON."}
-    
+
     logger.error(f"extract_search_results: Unhandled type or content: {type(response_content)}. Preview: {str(response_content)[:200]}")
     return {"status": "error", "message": f"Search result was not a recognized JSON format. Type: {type(response_content)}"}
 
@@ -392,15 +404,15 @@ def format_search_results_for_prompt(results_data, query, max_results=3):
 def format_db_results_for_prompt(query: str, db_results: Union[Dict, List], max_chars: int) -> str:
     if not db_results:
         return f"Database query '{query}' yielded no results."
-    
+
     try:
-        data_to_format = db_results 
-        if isinstance(db_results, str): 
+        data_to_format = db_results
+        if isinstance(db_results, str):
             data_to_format = json.loads(db_results)
 
         if isinstance(data_to_format, dict) and "error" in data_to_format:
             return f"Database query '{query}' failed: {data_to_format['error']}"
-        
+
         if isinstance(data_to_format, dict) and "rows" in data_to_format:
             rows = data_to_format["rows"]
             columns = data_to_format.get("columns", [])
@@ -416,18 +428,18 @@ def format_db_results_for_prompt(query: str, db_results: Union[Dict, List], max_
                 if isinstance(row_data, dict):
                     values = [str(row_data.get(col, "")) for col in columns] if columns else [str(v) for v in row_data.values()]
                     lines.append("| " + " | ".join(values) + " |")
-                elif isinstance(row_data, list): 
+                elif isinstance(row_data, list):
                     lines.append("| " + " | ".join(map(str, row_data)) + " |")
-                else: 
+                else:
                     lines.append(str(row_data))
-                
+
                 current_output = "\n".join(lines)
                 if len(current_output) > max_chars:
                     lines.append(f"... (results truncated due to length limit of {max_chars} chars)")
                     break
-            
+
             formatted_str = f"Database query results for '{query}':\n" + "\n".join(lines)
-        else: 
+        else:
             formatted_str = f"Database query results for '{query}':\n{json.dumps(data_to_format, indent=2)}"
 
         if len(formatted_str) > max_chars:
@@ -490,10 +502,10 @@ async def process_chat_request(payload: ChatPayload) -> ChatResponse:
                     llm_history.append({"role": msg_data["role"], "content": llm_content})
                 ui_history.append(ChatMessage(**msg_data))
         else: raise HTTPException(status_code=404, detail=f"Conv ID '{conv_id}' not found.")
-    
+
     if not model_name: model_name = payload.ollama_model_name or await get_default_ollama_model()
 
-    if not conv_id: 
+    if not conv_id:
         new_title = f"Chat: {user_msg_content[:30]}{'...' if len(user_msg_content) > 30 else ''}"
         new_doc = {"title": new_title, "created_at": datetime.now(timezone.utc), "updated_at": datetime.now(timezone.utc), "messages": [], "ollama_model_name": model_name}
         res = conversations_collection.insert_one(new_doc)
@@ -504,11 +516,11 @@ async def process_chat_request(payload: ChatPayload) -> ChatResponse:
     user_chat_msg = ChatMessage(role="user", content=user_msg_content)
     ui_history.append(user_chat_msg)
     user_msg_to_save = user_chat_msg.model_dump(exclude_none=True)
-    user_msg_to_save["raw_content_for_llm"] = user_msg_content 
+    user_msg_to_save["raw_content_for_llm"] = user_msg_content
     if obj_id: conversations_collection.update_one({"_id": obj_id}, {"$push": {"messages": user_msg_to_save}, "$set": {"updated_at": datetime.now(timezone.utc)}})
 
     if user_msg_content.lower() == '#clear':
-        llm_history.clear() 
+        llm_history.clear()
         assist_msg = ChatMessage(role="assistant", content="Chat context cleared.")
         ui_history.append(assist_msg)
         if obj_id: conversations_collection.update_one({"_id": obj_id}, {"$push": {"messages": assist_msg.model_dump(exclude_none=True)}, "$set": {"updated_at": datetime.now(timezone.utc)}})
@@ -527,11 +539,11 @@ async def process_chat_request(payload: ChatPayload) -> ChatResponse:
             logger.info(f"[API_CHAT] Web search active for: '{user_msg_content}'")
             try:
                 req_id = await submit_mcp_tool_request(WEB_SEARCH_SERVICE_NAME, "web_search", {"query": user_msg_content})
-                mcp_resp = await wait_mcp_response(WEB_SEARCH_SERVICE_NAME, req_id, timeout=90) 
+                mcp_resp = await wait_mcp_response(WEB_SEARCH_SERVICE_NAME, req_id, timeout=90)
 
                 if mcp_resp.get("status") == "error":
                     raise Exception(mcp_resp.get("error", "MCP web_search tool returned an error"))
-                
+
                 raw_data = mcp_resp.get("data")
                 extracted_results = extract_search_results(raw_data)
                 if extracted_results.get("status") == "error":
@@ -547,7 +559,7 @@ async def process_chat_request(payload: ChatPayload) -> ChatResponse:
                 logger.error(f"[API_CHAT] Web search processing error: {e}", exc_info=True)
                 assistant_error_message_obj = ChatMessage(role="assistant", content=f"⚠️ Web search failed: {str(e)[:100]}")
 
-    if payload.use_database and not assistant_error_message_obj: 
+    if payload.use_database and not assistant_error_message_obj:
         if not app_state.mcp_service_ready.get(MYSQL_DB_SERVICE_NAME, False):
             logger.warning("[API_CHAT] Database interaction requested but MySQL MCP service unavailable.")
             assistant_error_message_obj = ChatMessage(role="assistant", content="⚠️ Database interaction is currently unavailable.")
@@ -556,19 +568,19 @@ async def process_chat_request(payload: ChatPayload) -> ChatResponse:
             try:
                 tables_req_id = await submit_mcp_resource_request(MYSQL_DB_SERVICE_NAME, "resource://tables")
                 tables_resp = await wait_mcp_response(MYSQL_DB_SERVICE_NAME, tables_req_id)
-                
+
                 schema_context_parts = []
                 if tables_resp.get("status") == "success":
                     # extract_search_results will parse the JSON string from the resource content
-                    tables_data = extract_search_results(tables_resp.get("data")) 
-                    if isinstance(tables_data, list) and tables_data: 
+                    tables_data = extract_search_results(tables_resp.get("data"))
+                    if isinstance(tables_data, list) and tables_data:
                         schema_context_parts.append(f"Available tables: {', '.join(tables_data[:5])}{'...' if len(tables_data) > 5 else ''}.")
-                        for table_name in tables_data[:2]: 
+                        for table_name in tables_data[:2]:
                             schema_req_id = await submit_mcp_resource_request(MYSQL_DB_SERVICE_NAME, f"resource://tables/{table_name}/schema")
                             schema_resp = await wait_mcp_response(MYSQL_DB_SERVICE_NAME, schema_req_id)
                             if schema_resp.get("status") == "success":
                                 schema_data = extract_search_results(schema_resp.get("data"))
-                                schema_context_parts.append(f"Schema for '{table_name}': {json.dumps(schema_data, indent=None)[:200]}...") 
+                                schema_context_parts.append(f"Schema for '{table_name}': {json.dumps(schema_data, indent=None)[:200]}...")
                             else:
                                 schema_context_parts.append(f"Could not fetch schema for '{table_name}'. Error: {schema_resp.get('error', 'Unknown')}")
                     elif isinstance(tables_data, dict) and "error" in tables_data:
@@ -578,7 +590,7 @@ async def process_chat_request(payload: ChatPayload) -> ChatResponse:
 
                 else:
                     schema_context_parts.append(f"Could not retrieve table list from database. Error: {tables_resp.get('error', 'Unknown')}")
-                
+
                 full_schema_context = "\n".join(schema_context_parts)
                 logger.debug(f"[API_CHAT_DB] Schema context for LLM: {full_schema_context}")
 
@@ -607,9 +619,9 @@ async def process_chat_request(payload: ChatPayload) -> ChatResponse:
                 if not extracted_sql or extracted_sql.upper() == "NO_QUERY" or not extracted_sql.lower().startswith("select"):
                     logger.error(f"[API_CHAT_DB] Could not extract a valid SQL query. LLM raw response: '{raw_llm_sql_response}'. Extracted: '{extracted_sql}'")
                     raise Exception(f"Could not generate/extract a valid SQL query. LLM response: {str(raw_llm_sql_response)[:200]}...")
-                
+
                 logger.info(f"[API_CHAT_DB] LLM generated SQL (extracted): {extracted_sql}")
-                
+
                 if not extracted_sql.lower().strip().startswith("select "): # server_mysql.py also checks, but good to have here
                     raise Exception("Extracted query is not a SELECT query.")
 
@@ -619,14 +631,14 @@ async def process_chat_request(payload: ChatPayload) -> ChatResponse:
                 if query_resp.get("status") == "error":
                     raise Exception(f"Database query execution failed: {query_resp.get('error', 'Unknown error')}")
 
-                db_results_data = extract_search_results(query_resp.get("data")) 
-                
+                db_results_data = extract_search_results(query_resp.get("data"))
+
                 formatted_db_results = format_db_results_for_prompt(extracted_sql, db_results_data, MAX_DB_RESULT_CHARS)
-                
+
                 db_html_indicator = f"<div class='db-indicator-custom'><b>💾 Database:</b> Info from query \"{extracted_sql[:50].replace('<', '&lt;').replace('>', '&gt;')}...\" was used.</div>"
-                
+
                 prompt_for_llm = (f"Using the following database information related to '{user_msg_content}':\n{formatted_db_results}\n\n"
-                                  f"{prompt_for_llm}") 
+                                  f"{prompt_for_llm}")
                 logger.info(f"[API_CHAT_DB] Database interaction successful, enhanced prompt with DB results.")
 
             except Exception as e:
@@ -639,13 +651,13 @@ async def process_chat_request(payload: ChatPayload) -> ChatResponse:
         if obj_id: conversations_collection.update_one({"_id": obj_id}, {"$push": {"messages": assistant_error_message_obj.model_dump(exclude_none=True)}, "$set": {"updated_at": datetime.now(timezone.utc)}})
         return ChatResponse(conversation_id=conv_id, chat_history=ui_history, ollama_model_name=model_name)
 
-    llm_history.append({"role": "user", "content": prompt_for_llm}) 
+    llm_history.append({"role": "user", "content": prompt_for_llm})
     model_response_content = await chat_with_ollama(llm_history, model_name=model_name)
 
     if model_response_content:
         assistant_ui_response_content = model_response_content
         is_html_response = False
-        
+
         html_prefix = ""
         if search_html_indicator:
             html_prefix += search_html_indicator
@@ -653,17 +665,17 @@ async def process_chat_request(payload: ChatPayload) -> ChatResponse:
         if db_html_indicator:
             html_prefix += db_html_indicator
             is_html_response = True
-        
+
         if is_html_response:
             assistant_ui_response_content = f"{html_prefix}\n\n{model_response_content}"
 
         assistant_chat_msg = ChatMessage(role="assistant", content=assistant_ui_response_content, is_html=is_html_response)
         ui_history.append(assistant_chat_msg)
-        
+
         assist_msg_to_save = assistant_chat_msg.model_dump(exclude_none=True)
-        assist_msg_to_save["raw_content_for_llm"] = model_response_content 
+        assist_msg_to_save["raw_content_for_llm"] = model_response_content
         if obj_id: conversations_collection.update_one({"_id": obj_id}, {"$push": {"messages": assist_msg_to_save}, "$set": {"updated_at": datetime.now(timezone.utc)}})
-    else: 
+    else:
         llm_fail_msg = ChatMessage(role="assistant", content=f"Sorry, I could not get a response from the model ({model_name}).")
         ui_history.append(llm_fail_msg)
         if obj_id: conversations_collection.update_one({"_id": obj_id}, {"$push": {"messages": llm_fail_msg.model_dump(exclude_none=True)}, "$set": {"updated_at": datetime.now(timezone.utc)}})
@@ -686,11 +698,11 @@ async def chat_endpoint(payload: ChatPayload):
 async def get_status():
     ollama_ok = False
     try:
-        await asyncio.to_thread(ollama.list) 
+        await asyncio.to_thread(ollama.list)
         ollama_ok = True
     except Exception:
         pass
-    
+
     status_payload = {
         "db_connected": conversations_collection is not None,
         "ollama_available": ollama_ok,
@@ -741,11 +753,11 @@ async def list_conversations():
         cursor = conversations_collection.find({}, {"messages": 0}).sort("updated_at", -1).limit(50)
         convs_data = list(cursor)
         conv_list_items = []
-        default_model_name_cache = None 
+        default_model_name_cache = None
         for db_conv_doc in convs_data:
-            message_count_query = {"_id": db_conv_doc["_id"], "messages.0": {"$exists": True}} 
-            msg_count = conversations_collection.count_documents(message_count_query) 
-            
+            message_count_query = {"_id": db_conv_doc["_id"], "messages.0": {"$exists": True}}
+            msg_count = conversations_collection.count_documents(message_count_query)
+
             item_data = {**db_conv_doc, "_id": str(db_conv_doc["_id"]), "message_count": msg_count}
             if not item_data.get("ollama_model_name"):
                 if default_model_name_cache is None:
@@ -771,7 +783,7 @@ async def get_conversation_messages(conversation_id: str):
         raise HTTPException(status_code=500, detail="Error fetching conversation details.")
 
 @app.delete("/api/conversations/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_conversation_endpoint(conversation_id: str): 
+async def delete_conversation_endpoint(conversation_id: str):
     if conversations_collection is None: raise HTTPException(status_code=503, detail="MongoDB unavailable.")
     if not ObjectId.is_valid(conversation_id): raise HTTPException(status_code=400, detail="Invalid conversation ID format.")
     try:
@@ -786,31 +798,31 @@ async def delete_conversation_endpoint(conversation_id: str):
         raise HTTPException(status_code=500, detail="Error deleting conversation.")
 
 @app.put("/api/conversations/{conversation_id}/rename", response_model=ConversationListItem, response_model_by_alias=False)
-async def rename_conversation_title_endpoint(conversation_id: str, payload: RenamePayload): 
+async def rename_conversation_title_endpoint(conversation_id: str, payload: RenamePayload):
     if conversations_collection is None: raise HTTPException(status_code=503, detail="MongoDB unavailable.")
     if not ObjectId.is_valid(conversation_id): raise HTTPException(status_code=400, detail="Invalid conversation ID format.")
     obj_id = ObjectId(conversation_id)
     try:
         if conversations_collection.count_documents({"_id": obj_id}) == 0:
             raise HTTPException(status_code=404, detail="Conversation not found for renaming.")
-        
+
         update_result = conversations_collection.update_one(
             {"_id": obj_id},
             {"$set": {"title": payload.new_title, "updated_at": datetime.now(timezone.utc)}}
         )
-        if update_result.matched_count == 0: 
+        if update_result.matched_count == 0:
              raise HTTPException(status_code=404, detail="Conversation not found during update operation.")
 
         updated_conv_doc = conversations_collection.find_one({"_id": obj_id})
-        if not updated_conv_doc: 
+        if not updated_conv_doc:
             logger.error(f"Failed to retrieve conversation {conversation_id} after rename.")
             raise HTTPException(status_code=500, detail="Failed to retrieve updated conversation details.")
-        
+
         msg_count = conversations_collection.count_documents({"_id": updated_conv_doc["_id"], "messages.0": {"$exists": True}})
         item_data = {**updated_conv_doc, "_id": str(updated_conv_doc["_id"]), "message_count": msg_count}
         if not item_data.get("ollama_model_name"):
-            item_data["ollama_model_name"] = await get_default_ollama_model() 
-        
+            item_data["ollama_model_name"] = await get_default_ollama_model()
+
         logger.info(f"Renamed conversation ID {conversation_id} to '{payload.new_title}'")
         return ConversationListItem.model_validate(item_data)
     except HTTPException: raise
@@ -830,11 +842,11 @@ else:
 # --- Main Execution ---
 if __name__ == "__main__":
     logger.info(f"Starting Uvicorn for {__name__} when script is run directly. MCP services startup handled by FastAPI's lifespan manager.")
-    
+
     uvicorn.run(
-        "main:app",  
+        "main:app",
         host="127.0.0.1",
         port=8000,
         log_level="info",
-        reload=True 
+        reload=True
     )
