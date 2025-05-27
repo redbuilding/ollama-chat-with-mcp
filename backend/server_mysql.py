@@ -4,6 +4,7 @@ import mysql.connector
 from mysql.connector import Error
 import json
 import re
+from decimal import Decimal
 from typing import Dict, Union, List
 from mcp.server.fastmcp import FastMCP
 from dotenv import load_dotenv
@@ -279,7 +280,6 @@ def get_table_schema_resource(table_name: str) -> str:
 # --- Main Execution Block ---
 if __name__ == "__main__":
     # Import Decimal here if needed for type checking, prevents import error if not installed
-    from decimal import Decimal
     print("Starting MCP server for MySQL database interaction...", file=sys.stderr)
     # Run the server using standard I/O transport
     server.run(transport="stdio")
