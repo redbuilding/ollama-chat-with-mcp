@@ -22,7 +22,8 @@ from pymongo.errors import ConnectionFailure, OperationFailure
 
 # MCP Imports
 import subprocess
-from mcp import ClientSession, Uri # Corrected import for Uri
+from mcp import ClientSession
+from mcp.common.model.uri import Uri # Corrected import for Uri
 from fastmcp.client.transports import StdioServerParameters, stdio_client
 # from mcp.common.content import TextContent # For type checking if needed
 
