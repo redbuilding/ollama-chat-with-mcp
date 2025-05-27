@@ -23,7 +23,7 @@ from pymongo.errors import ConnectionFailure, OperationFailure
 # MCP Imports
 import subprocess
 from mcp import ClientSession
-from mcp.common.model.uri import Uri # Corrected import for Uri
+# from mcp.common.model.uri import Uri # Removed this incorrect import
 from fastmcp.client.transports import StdioServerParameters, stdio_client
 # from mcp.common.content import TextContent # For type checking if needed
 
@@ -196,9 +196,7 @@ async def run_mcp_service_instance(config: MCPServiceConfig):
                                     elif request_type == "resource":
                                         uri_to_get = request_data["uri"]
                                         logger.debug(f"MCP_SERVICE ({service_name}): Getting RESOURCE '{uri_to_get}' (req_id: {request_id})")
-                                        # Ensure URI is valid if necessary, though MCP client might handle this
-                                        # validated_uri = Uri(uri_to_get) # Example validation
-                                        resource_content = await session.get_resource_content(Uri(uri_to_get))
+                                        resource_content = await session.get_resource_content(uri_to_get) # Changed: Use uri_to_get directly
                                         duration = time.time() - start_time
                                         logger.info(f"MCP_SERVICE ({service_name}): RESOURCE '{uri_to_get}' completed in {duration:.2f}s (req_id: {request_id})")
                                         logger.debug(f"MCP_SERVICE ({service_name}): RESOURCE '{uri_to_get}' result content type: {type(resource_content)}. Content preview: {str(resource_content)[:200]}")
