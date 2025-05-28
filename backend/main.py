@@ -575,14 +575,14 @@ async def process_chat_request(payload: ChatPayload) -> ChatResponse:
                     tables_data = extract_search_results(tables_resp.get("data"))
                     if isinstance(tables_data, list) and tables_data:
                         schema_context_parts.append(f"Available tables: {', '.join(tables_data[:5])}{'...' if len(tables_data) > 5 else ''}.")
-                        for table_name in tables_data[:2]:
-                            schema_req_id = await submit_mcp_resource_request(MYSQL_DB_SERVICE_NAME, f"resource://tables/{table_name}/schema")
+                        for table_name_from_list in tables_data[:2]: # Renamed to avoid conflict
+                            schema_req_id = await submit_mcp_resource_request(MYSQL_DB_SERVICE_NAME, f"resource://tables/{table_name_from_list}/schema")
                             schema_resp = await wait_mcp_response(MYSQL_DB_SERVICE_NAME, schema_req_id)
                             if schema_resp.get("status") == "success":
                                 schema_data = extract_search_results(schema_resp.get("data"))
-                                schema_context_parts.append(f"Schema for '{table_name}': {json.dumps(schema_data, indent=None)[:200]}...")
+                                schema_context_parts.append(f"Schema for '{table_name_from_list}': {json.dumps(schema_data, indent=None)[:200]}...")
                             else:
-                                schema_context_parts.append(f"Could not fetch schema for '{table_name}'. Error: {schema_resp.get('error', 'Unknown')}")
+                                schema_context_parts.append(f"Could not fetch schema for '{table_name_from_list}'. Error: {schema_resp.get('error', 'Unknown')}")
                     elif isinstance(tables_data, dict) and "error" in tables_data:
                          schema_context_parts.append(f"Could not list tables: {tables_data['error']}")
                     else: # If tables_data is not a list (e.g. error from extract_search_results) or empty
@@ -594,8 +594,20 @@ async def process_chat_request(payload: ChatPayload) -> ChatResponse:
                 full_schema_context = "\n".join(schema_context_parts)
                 logger.debug(f"[API_CHAT_DB] Schema context for LLM: {full_schema_context}")
 
+                system_message_content = f"""You are a SQL expert. Your task is to generate a single, safe, read-only SQL SELECT query to answer the user's question.
+You will be provided with the database schema context.
+Follow these rules strictly:
+1. Base your query *only* on the tables and columns explicitly listed in the provided Database Schema Context.
+2. Do *not* invent or assume any table or column names that are not present in the schema.
+3. If the user's question involves filtering (e.g., by city, name, date), ensure the column you use for the WHERE clause exists in the schema and is appropriate for the filter.
+4. If the schema does not contain the necessary information to answer the question, or if the question is too ambiguous to translate into a SQL query based *only* on the provided schema, you MUST output the exact string: NO_QUERY_POSSIBLE
+5. Otherwise, output ONLY the SQL SELECT query. Do not include any explanations, natural language, or markdown formatting (like ```sql ... ```). Just the raw SQL query.
+
+Database Schema Context:
+{full_schema_context}
+"""
                 sql_generation_prompt_messages = [
-                    {"role": "system", "content": f"You are a SQL expert. Given the database schema context:\n{full_schema_context}\nGenerate a safe, read-only SQL SELECT query to answer the user's question. Output ONLY the SQL query. If you cannot generate a query, output 'NO_QUERY'."},
+                    {"role": "system", "content": system_message_content},
                     {"role": "user", "content": user_msg_content}
                 ]
                 raw_llm_sql_response = await chat_with_ollama(sql_generation_prompt_messages, model_name)
@@ -607,23 +619,23 @@ async def process_chat_request(payload: ChatPayload) -> ChatResponse:
                     if sql_match:
                         extracted_sql = sql_match.group(1).strip()
                     else:
-                        # Fallback: if no markdown, try to clean the response and check if it's a SELECT
-                        cleaned_response = raw_llm_sql_response.strip()
-                        # A more robust fallback might be needed if LLMs are inconsistent
-                        if cleaned_response.lower().startswith("select"):
-                            extracted_sql = cleaned_response
-                        elif cleaned_response.upper() == "NO_QUERY":
-                             extracted_sql = "NO_QUERY"
+                        # Fallback: if no markdown, use the response directly, assuming it followed instructions
+                        extracted_sql = raw_llm_sql_response.strip()
 
+                if extracted_sql and extracted_sql.upper() == "NO_QUERY_POSSIBLE":
+                    logger.info(f"[API_CHAT_DB] LLM determined no query possible for: '{user_msg_content}'")
+                    raise Exception("I could not form a SQL query to answer your question based on the available database schema. Please ensure your question relates to the provided table structures, or try rephrasing.")
 
-                if not extracted_sql or extracted_sql.upper() == "NO_QUERY" or not extracted_sql.lower().startswith("select"):
-                    logger.error(f"[API_CHAT_DB] Could not extract a valid SQL query. LLM raw response: '{raw_llm_sql_response}'. Extracted: '{extracted_sql}'")
-                    raise Exception(f"Could not generate/extract a valid SQL query. LLM response: {str(raw_llm_sql_response)[:200]}...")
+                if not extracted_sql or not extracted_sql.lower().strip().startswith("select"):
+                    logger.error(f"[API_CHAT_DB] Could not extract a valid SQL SELECT query. LLM raw response: '{raw_llm_sql_response}'. Extracted: '{extracted_sql}'")
+                    raise Exception(f"I had trouble generating a valid SQL query. The model's attempt was: {str(raw_llm_sql_response)[:150]}...")
+
 
                 logger.info(f"[API_CHAT_DB] LLM generated SQL (extracted): {extracted_sql}")
 
-                if not extracted_sql.lower().strip().startswith("select "): # server_mysql.py also checks, but good to have here
-                    raise Exception("Extracted query is not a SELECT query.")
+                # server_mysql.py also checks, but good to have here as a safeguard before sending
+                if not extracted_sql.lower().strip().startswith("select "):
+                    raise Exception("The generated query is not a SELECT query. For safety, only SELECT queries are allowed.")
 
                 query_req_id = await submit_mcp_tool_request(MYSQL_DB_SERVICE_NAME, "execute_sql_query_tool", {"query": extracted_sql})
                 query_resp = await wait_mcp_response(MYSQL_DB_SERVICE_NAME, query_req_id)
@@ -638,7 +650,7 @@ async def process_chat_request(payload: ChatPayload) -> ChatResponse:
                 db_html_indicator = f"<div class='db-indicator-custom'><b>💾 Database:</b> Info from query \"{extracted_sql[:50].replace('<', '&lt;').replace('>', '&gt;')}...\" was used.</div>"
 
                 prompt_for_llm = (f"Using the following database information related to '{user_msg_content}':\n{formatted_db_results}\n\n"
-                                  f"{prompt_for_llm}")
+                                  f"{prompt_for_llm}") # Append to existing prompt_for_llm if search was also used
                 logger.info(f"[API_CHAT_DB] Database interaction successful, enhanced prompt with DB results.")
 
             except Exception as e:
