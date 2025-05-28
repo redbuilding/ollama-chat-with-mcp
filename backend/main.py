@@ -589,7 +589,7 @@ async def process_chat_request(payload: ChatPayload) -> ChatResponse:
                             else: # MCP error fetching schema for this table
                                 formatted_schema_str += f"  Error fetching schema via MCP: {schema_resp.get('error', 'Unknown MCP error')}\n"
                             schema_context_parts.append(formatted_schema_str.strip())
-                        
+
                         if len(tables_data) > MAX_TABLES_FOR_SCHEMA_CONTEXT:
                             schema_context_parts.append(f"\n...and {len(tables_data) - MAX_TABLES_FOR_SCHEMA_CONTEXT} more tables (schema not shown due to context limits).")
 
@@ -601,14 +601,17 @@ async def process_chat_request(payload: ChatPayload) -> ChatResponse:
                     schema_context_parts.append(f"Could not retrieve table list from database. Error: {tables_resp.get('error', 'Unknown MCP error')}")
 
                 full_schema_context = "\n".join(schema_context_parts)
-                logger.info(f"[API_CHAT_DB_PRE_SQL_GEN] User Query: '{user_msg_content}', Schema Context (Preview): '{full_schema_context[:300].replace('\n', ' ')}...'")
+                # logger.info(f"[API_CHAT_DB_PRE_SQL_GEN] User Query: '{user_msg_content}', Schema Context (Preview): '{full_schema_context[:300].replace('\n', ' ')}...'")
+
+                schema_preview = full_schema_context[:300].replace('\n', ' ')
+                logger.info(f"[API_CHAT_DB_PRE_SQL_GEN] User Query: '{user_msg_content}', Schema Context (Preview): '{schema_preview}...'")
 
                 # SQL Generation and Retry Loop (max 2 attempts)
                 extracted_sql = None
                 db_results_data = None
                 previous_faulty_sql = None
                 previous_db_error = None
-                
+
                 for attempt in range(2): # 0: initial, 1: retry
                     current_system_message_content = ""
                     if attempt == 0:
@@ -652,13 +655,13 @@ Database Schema Context:
                         {"role": "user", "content": user_msg_content}
                     ]
                     raw_llm_sql_response = await chat_with_ollama(sql_generation_prompt_messages, model_name)
-                    
+
                     temp_extracted_sql = None
                     if raw_llm_sql_response:
                         sql_match = re.search(r"```(?:sql)?\s*([\s\S]+?)\s*```", raw_llm_sql_response, re.IGNORECASE)
                         if sql_match: temp_extracted_sql = sql_match.group(1).strip()
                         else: temp_extracted_sql = raw_llm_sql_response.strip()
-                    
+
                     logger.info(f"[API_CHAT_DB_SQL_GENERATED] Attempt: {attempt + 1}, SQL: '{temp_extracted_sql}', Raw LLM Resp (Preview): '{str(raw_llm_sql_response)[:100]}'")
 
                     if temp_extracted_sql and temp_extracted_sql.upper() == "NO_QUERY_POSSIBLE":
@@ -679,12 +682,12 @@ Database Schema Context:
                         if attempt == 1: user_err_msg += " (Retry also failed this check)."
                         logger.warning(f"[API_CHAT_DB] Generated query not a SELECT query (Attempt {attempt+1}): {temp_extracted_sql}")
                         raise Exception(user_err_msg)
-                    
+
                     extracted_sql = temp_extracted_sql # Commit if valid so far
 
                     query_req_id = await submit_mcp_tool_request(MYSQL_DB_SERVICE_NAME, "execute_sql_query_tool", {"query": extracted_sql})
                     query_resp = await wait_mcp_response(MYSQL_DB_SERVICE_NAME, query_req_id)
-                    
+
                     db_results_data = extract_search_results(query_resp.get("data")) # Parse response from MCP tool
 
                     log_exec_payload = {
@@ -720,20 +723,20 @@ Database Schema Context:
                                 user_facing_error = "It seems the information needed for your query (like a specific table or column) wasn't found in the database as expected."
                             elif "syntax error" in error_detail_str:
                                 user_facing_error = "I had trouble constructing a valid query for the database based on your request."
-                            
+
                             if attempt == 1: user_facing_error += " (Even after a retry)."
                             else: user_facing_error += " Could you try rephrasing or ensuring your question matches the database's structure?"
-                            
+
                             logger.error(f"[API_CHAT_DB] SQL execution error (Attempt {attempt+1}): '{db_results_data['error']}'. SQL: '{extracted_sql}'")
                             raise Exception(user_facing_error)
-                    
+
                     # If we reach here, SQL execution was successful (no error in db_results_data)
                     break # Exit retry loop successfully
                 # End of SQL Generation and Retry Loop
 
                 # This part is reached only if the loop completed successfully (i.e., break was hit)
                 formatted_db_results = format_db_results_for_prompt(extracted_sql, db_results_data, MAX_DB_RESULT_CHARS)
-                
+
                 if "failed to parse" in formatted_db_results.lower() or \
                    (isinstance(db_results_data, dict) and db_results_data.get("status") == "error"): # from extract_search_results if it put its own error
                     logger.error(f"[API_CHAT_DB] Error formatting or parsing DB results. Formatted: '{formatted_db_results}'. Raw Data: '{str(db_results_data)[:200]}'")
