@@ -49,14 +49,7 @@ logger.setLevel(logging.INFO)
 WEB_SEARCH_SERVICE_NAME = "web_search_service"
 MYSQL_DB_SERVICE_NAME = "mysql_db_service"
 MAX_DB_RESULT_CHARS = 5000 # Proxy for token limit (approx 1000-1200 tokens)
-# For more accurate token counting, consider using a library like tiktoken:
-# import tiktoken
-# def count_tokens(text: str, model_name: str = "gpt-3.5-turbo") -> int:
-#     try:
-#         encoding = tiktoken.encoding_for_model(model_name)
-#     except KeyError:
-#         encoding = tiktoken.get_encoding("cl100k_base")
-#     return len(encoding.encode(text))
+MAX_TABLES_FOR_SCHEMA_CONTEXT = 7 # Max tables to fetch full schema for, to keep prompt size reasonable
 
 # --- MongoDB Setup ---
 MONGODB_URI = os.getenv('MONGODB_URI', 'mongodb://localhost:27017/')
@@ -571,43 +564,55 @@ async def process_chat_request(payload: ChatPayload) -> ChatResponse:
             try:
                 tables_req_id = await submit_mcp_resource_request(MYSQL_DB_SERVICE_NAME, "resource://tables")
                 tables_resp = await wait_mcp_response(MYSQL_DB_SERVICE_NAME, tables_req_id)
-
                 schema_context_parts = []
+
                 if tables_resp.get("status") == "success":
                     tables_data = extract_search_results(tables_resp.get("data"))
                     if isinstance(tables_data, list) and tables_data:
-                        schema_context_parts.append(f"Available tables: {', '.join(tables_data[:5])}{'...' if len(tables_data) > 5 else ''}.")
-                        for table_name_from_list in tables_data[:2]:
+                        schema_context_parts.append(f"Available tables: {', '.join(tables_data)}.")
+                        tables_to_fetch_schema = tables_data[:MAX_TABLES_FOR_SCHEMA_CONTEXT]
+                        for i, table_name_from_list in enumerate(tables_to_fetch_schema):
                             schema_req_id = await submit_mcp_resource_request(MYSQL_DB_SERVICE_NAME, f"resource://tables/{table_name_from_list}/schema")
                             schema_resp = await wait_mcp_response(MYSQL_DB_SERVICE_NAME, schema_req_id)
+                            formatted_schema_str = f"\nTable: {table_name_from_list}\n"
                             if schema_resp.get("status") == "success":
                                 schema_data = extract_search_results(schema_resp.get("data"))
-                                schema_context_parts.append(f"Schema for '{table_name_from_list}': {json.dumps(schema_data, indent=None)[:200]}...")
-                            else:
-                                schema_context_parts.append(f"Could not fetch schema for '{table_name_from_list}'. Error: {schema_resp.get('error', 'Unknown')}")
-                    elif isinstance(tables_data, dict) and "error" in tables_data:
+                                if isinstance(schema_data, list):
+                                    for col_info in schema_data:
+                                        col_name = col_info.get('Field', 'N/A')
+                                        col_type = col_info.get('Type', 'N/A')
+                                        formatted_schema_str += f"- {col_name}: {col_type}\n"
+                                elif isinstance(schema_data, dict) and "error" in schema_data: # Error from server_mysql for this table's schema
+                                    formatted_schema_str += f"  Error fetching schema: {schema_data['error']}\n"
+                                else: # Unexpected schema_data format
+                                    formatted_schema_str += f"  Could not parse schema data: {str(schema_data)[:100]}\n"
+                            else: # MCP error fetching schema for this table
+                                formatted_schema_str += f"  Error fetching schema via MCP: {schema_resp.get('error', 'Unknown MCP error')}\n"
+                            schema_context_parts.append(formatted_schema_str.strip())
+                        
+                        if len(tables_data) > MAX_TABLES_FOR_SCHEMA_CONTEXT:
+                            schema_context_parts.append(f"\n...and {len(tables_data) - MAX_TABLES_FOR_SCHEMA_CONTEXT} more tables (schema not shown due to context limits).")
+
+                    elif isinstance(tables_data, dict) and "error" in tables_data: # Error from server_mysql for resource://tables
                          schema_context_parts.append(f"Could not list tables: {tables_data['error']}")
-                    else:
+                    else: # tables_data is not a list or is empty, or extract_search_results returned its own error
                         schema_context_parts.append(f"Could not parse table list or no tables found. Raw: {str(tables_data)[:100]}")
-                else:
-                    schema_context_parts.append(f"Could not retrieve table list from database. Error: {tables_resp.get('error', 'Unknown')}")
+                else: # MCP error for resource://tables
+                    schema_context_parts.append(f"Could not retrieve table list from database. Error: {tables_resp.get('error', 'Unknown MCP error')}")
 
                 full_schema_context = "\n".join(schema_context_parts)
-                logger.debug(f"[API_CHAT_DB] Schema context for LLM: {full_schema_context}")
+                logger.info(f"[API_CHAT_DB_PRE_SQL_GEN] User Query: '{user_msg_content}', Schema Context (Preview): '{full_schema_context[:300].replace('\n', ' ')}...'")
 
-#                 system_message_content = f"""You are a SQL expert. Your task is to generate a single, safe, read-only SQL SELECT query to answer the user's question.
-# You will be provided with the database schema context.
-# Follow these rules strictly:
-# 1. Base your query *only* on the tables and columns explicitly listed in the provided Database Schema Context.
-# 2. Do *not* invent or assume any table or column names that are not present in the schema.
-# 3. If the user's question involves filtering (e.g., by city, name, date), ensure the column you use for the WHERE clause exists in the schema and is appropriate for the filter.
-# 4. If the schema does not contain the necessary information to answer the question, or if the question is too ambiguous to translate into a SQL query based *only* on the provided schema, you MUST output the exact string: NO_QUERY_POSSIBLE
-# 5. Otherwise, output ONLY the SQL SELECT query. Do not include any explanations, natural language, or markdown formatting (like ```sql ... ```). Just the raw SQL query.
-
-# Database Schema Context:
-# {full_schema_context}
-# """
-                system_message_content = f"""== HARD RULES – FOLLOW STRICTLY ==
+                # SQL Generation and Retry Loop (max 2 attempts)
+                extracted_sql = None
+                db_results_data = None
+                previous_faulty_sql = None
+                previous_db_error = None
+                
+                for attempt in range(2): # 0: initial, 1: retry
+                    current_system_message_content = ""
+                    if attempt == 0:
+                        current_system_message_content = f"""== HARD RULES – FOLLOW STRICTLY ==
 ① Use only the tables and columns that appear verbatim in the **Database Schema Context** block below.
 ② Never invent, rename or infer table/column names.
 ③ Before writing SQL, silently:
@@ -624,62 +629,113 @@ async def process_chat_request(payload: ChatPayload) -> ChatResponse:
 {full_schema_context}
 ###
 """
-                sql_generation_prompt_messages = [
-                    {"role": "system", "content": system_message_content},
-                    {"role": "user", "content": user_msg_content}
-                ]
-                raw_llm_sql_response = await chat_with_ollama(sql_generation_prompt_messages, model_name)
+                    else: # This is a retry attempt
+                        logger.info(f"[API_CHAT_DB_RETRY_SQL_GEN] Retrying SQL generation. Previous SQL: '{previous_faulty_sql}', Previous Error: '{previous_db_error}'")
+                        current_system_message_content = f"""Your previous SQL query attempt failed.
+Original User Question: {user_msg_content}
+Your Faulty SQL Query: {previous_faulty_sql}
+Database Error Message: {previous_db_error}
 
-                extracted_sql = None
-                if raw_llm_sql_response:
-                    sql_match = re.search(r"```(?:sql)?\s*([\s\S]+?)\s*```", raw_llm_sql_response, re.IGNORECASE)
-                    if sql_match:
-                        extracted_sql = sql_match.group(1).strip()
-                    else:
-                        extracted_sql = raw_llm_sql_response.strip()
+Please re-evaluate the provided database schema and the user's question carefully.
+Generate a corrected, safe, read-only SQL SELECT query.
+Follow these rules strictly:
+1. Base your query *only* on the tables and columns explicitly listed in the provided Database Schema Context.
+2. Do *not* invent or assume any table or column names that are not present in the schema.
+3. If the schema does not contain the necessary information to answer the question, or if the question is too ambiguous to translate into a SQL query based *only* on the provided schema, you MUST output the exact string: NO_QUERY_POSSIBLE
+4. Otherwise, output ONLY the SQL SELECT query. Do not include any explanations, natural language, or markdown formatting (like ```sql ... ```). Just the raw SQL query.
 
-                if extracted_sql and extracted_sql.upper() == "NO_QUERY_POSSIBLE":
-                    logger.info(f"[API_CHAT_DB] LLM determined no query possible for: '{user_msg_content}'")
-                    raise Exception("I could not form a SQL query to answer your question based on the available database schema. Please ensure your question relates to the provided table structures, or try rephrasing.")
+Database Schema Context:
+{full_schema_context}
+"""
+                    sql_generation_prompt_messages = [
+                        {"role": "system", "content": current_system_message_content},
+                        {"role": "user", "content": user_msg_content}
+                    ]
+                    raw_llm_sql_response = await chat_with_ollama(sql_generation_prompt_messages, model_name)
+                    
+                    temp_extracted_sql = None
+                    if raw_llm_sql_response:
+                        sql_match = re.search(r"```(?:sql)?\s*([\s\S]+?)\s*```", raw_llm_sql_response, re.IGNORECASE)
+                        if sql_match: temp_extracted_sql = sql_match.group(1).strip()
+                        else: temp_extracted_sql = raw_llm_sql_response.strip()
+                    
+                    logger.info(f"[API_CHAT_DB_SQL_GENERATED] Attempt: {attempt + 1}, SQL: '{temp_extracted_sql}', Raw LLM Resp (Preview): '{str(raw_llm_sql_response)[:100]}'")
 
-                if not extracted_sql or not extracted_sql.lower().strip().startswith("select"):
-                    logger.error(f"[API_CHAT_DB] Could not extract a valid SQL SELECT query. LLM raw response: '{raw_llm_sql_response}'. Extracted: '{extracted_sql}'")
-                    raise Exception(f"I had trouble generating a valid SQL query. The model's attempt was: {str(raw_llm_sql_response)[:150]}...")
+                    if temp_extracted_sql and temp_extracted_sql.upper() == "NO_QUERY_POSSIBLE":
+                        user_err_msg = "I could not form a SQL query to answer your question based on the available database schema."
+                        if attempt == 1: user_err_msg += " (Retry also failed)."
+                        else: user_err_msg += " Please ensure your question relates to the provided table structures, or try rephrasing."
+                        logger.info(f"[API_CHAT_DB] LLM determined no query possible (Attempt {attempt+1}).")
+                        raise Exception(user_err_msg)
 
-                logger.info(f"[API_CHAT_DB] LLM generated SQL (extracted): {extracted_sql}")
+                    if not temp_extracted_sql or not temp_extracted_sql.lower().strip().startswith("select"):
+                        user_err_msg = f"I had trouble generating a valid SQL query. The model's attempt was: {str(raw_llm_sql_response)[:100]}..."
+                        if attempt == 1: user_err_msg += " (Retry also failed to produce valid SQL)."
+                        logger.error(f"[API_CHAT_DB] Could not extract a valid SQL SELECT query (Attempt {attempt+1}). LLM raw: '{raw_llm_sql_response}'. Extracted: '{temp_extracted_sql}'")
+                        raise Exception(user_err_msg)
 
-                if not extracted_sql.lower().strip().startswith("select "):
-                    raise Exception("The generated query is not a SELECT query. For safety, only SELECT queries are allowed.")
+                    if not temp_extracted_sql.lower().strip().startswith("select "): # Stricter check
+                        user_err_msg = "The generated query is not a SELECT query. For safety, only SELECT queries are allowed."
+                        if attempt == 1: user_err_msg += " (Retry also failed this check)."
+                        logger.warning(f"[API_CHAT_DB] Generated query not a SELECT query (Attempt {attempt+1}): {temp_extracted_sql}")
+                        raise Exception(user_err_msg)
+                    
+                    extracted_sql = temp_extracted_sql # Commit if valid so far
 
-                query_req_id = await submit_mcp_tool_request(MYSQL_DB_SERVICE_NAME, "execute_sql_query_tool", {"query": extracted_sql})
-                query_resp = await wait_mcp_response(MYSQL_DB_SERVICE_NAME, query_req_id)
+                    query_req_id = await submit_mcp_tool_request(MYSQL_DB_SERVICE_NAME, "execute_sql_query_tool", {"query": extracted_sql})
+                    query_resp = await wait_mcp_response(MYSQL_DB_SERVICE_NAME, query_req_id)
+                    
+                    db_results_data = extract_search_results(query_resp.get("data")) # Parse response from MCP tool
 
-                if query_resp.get("status") == "error": # Handles MCP communication errors
-                    raise Exception(f"Database MCP tool communication failed: {query_resp.get('error', 'Unknown MCP error')}")
+                    log_exec_payload = {
+                        "user_query": user_msg_content, "attempt_number": attempt + 1, "sql_generated": extracted_sql,
+                        "mcp_tool_status": query_resp.get("status"),
+                        "mcp_tool_error": query_resp.get("error") if query_resp.get("status") == "error" else None,
+                        "db_execution_error_in_data": db_results_data.get("error") if isinstance(db_results_data, dict) and "error" in db_results_data else None,
+                        "db_rows_returned_count": len(db_results_data.get("rows", [])) if isinstance(db_results_data, dict) and "rows" in db_results_data else None
+                    }
+                    logger.info(f"[API_CHAT_DB_SQL_EXECUTED] Details: {json.dumps(log_exec_payload)}")
 
-                db_results_data = extract_search_results(query_resp.get("data"))
 
-                # Check for errors reported *by the database execution* within the data payload
-                if isinstance(db_results_data, dict) and "error" in db_results_data:
-                    error_detail = db_results_data["error"]
-                    user_facing_error = "I encountered an issue while querying the database."
-                    if "unknown column" in str(error_detail).lower() or \
-                       "no such table" in str(error_detail).lower() or \
-                       "doesn't exist" in str(error_detail).lower():
-                        user_facing_error = "It seems the information needed for your query (like a specific table or column) wasn't found in the database as expected. Could you try rephrasing or ensuring your question matches the database's structure?"
-                    elif "syntax error" in str(error_detail).lower():
-                        user_facing_error = "I had trouble constructing a valid query for the database based on your request."
+                    if query_resp.get("status") == "error": # MCP communication error
+                        err_msg = f"Database MCP tool communication failed: {query_resp.get('error', 'Unknown MCP error')}"
+                        if attempt == 1 : err_msg += " (on retry)"
+                        raise Exception(err_msg)
 
-                    logger.error(f"[API_CHAT_DB] SQL execution error: '{error_detail}'. SQL attempted: '{extracted_sql}'")
-                    raise Exception(user_facing_error)
+                    if isinstance(db_results_data, dict) and "error" in db_results_data:
+                        error_detail_str = str(db_results_data["error"]).lower()
+                        is_recoverable_db_error = "unknown column" in error_detail_str or \
+                                                  "no such table" in error_detail_str or \
+                                                  "doesn't exist" in error_detail_str or \
+                                                  "syntax error" in error_detail_str # Consider syntax error potentially recoverable by LLM
 
-                # If we reach here, the SQL query itself executed without returning an error structure.
+                        if attempt == 0 and is_recoverable_db_error:
+                            previous_faulty_sql = extracted_sql
+                            previous_db_error = db_results_data["error"]
+                            logger.warning(f"[API_CHAT_DB] Recoverable DB error on first attempt: '{previous_db_error}'. SQL: '{previous_faulty_sql}'. Proceeding to retry.")
+                            continue # Go to the next iteration for retry
+                        else: # Non-recoverable error, or error on retry attempt
+                            user_facing_error = "I encountered an issue while querying the database."
+                            if "unknown column" in error_detail_str or "no such table" in error_detail_str or "doesn't exist" in error_detail_str:
+                                user_facing_error = "It seems the information needed for your query (like a specific table or column) wasn't found in the database as expected."
+                            elif "syntax error" in error_detail_str:
+                                user_facing_error = "I had trouble constructing a valid query for the database based on your request."
+                            
+                            if attempt == 1: user_facing_error += " (Even after a retry)."
+                            else: user_facing_error += " Could you try rephrasing or ensuring your question matches the database's structure?"
+                            
+                            logger.error(f"[API_CHAT_DB] SQL execution error (Attempt {attempt+1}): '{db_results_data['error']}'. SQL: '{extracted_sql}'")
+                            raise Exception(user_facing_error)
+                    
+                    # If we reach here, SQL execution was successful (no error in db_results_data)
+                    break # Exit retry loop successfully
+                # End of SQL Generation and Retry Loop
+
+                # This part is reached only if the loop completed successfully (i.e., break was hit)
                 formatted_db_results = format_db_results_for_prompt(extracted_sql, db_results_data, MAX_DB_RESULT_CHARS)
-
-                # Fallback check if formatting itself reveals an issue not caught above (e.g. parsing error of non-error data)
-                # This also catches if extract_search_results itself returned an error dict (e.g. {"status": "error", "message": ...})
+                
                 if "failed to parse" in formatted_db_results.lower() or \
-                   (isinstance(db_results_data, dict) and db_results_data.get("status") == "error"):
+                   (isinstance(db_results_data, dict) and db_results_data.get("status") == "error"): # from extract_search_results if it put its own error
                     logger.error(f"[API_CHAT_DB] Error formatting or parsing DB results. Formatted: '{formatted_db_results}'. Raw Data: '{str(db_results_data)[:200]}'")
                     raise Exception("I received data from the database, but had trouble understanding or formatting it.")
 
