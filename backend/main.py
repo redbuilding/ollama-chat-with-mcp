@@ -595,17 +595,34 @@ async def process_chat_request(payload: ChatPayload) -> ChatResponse:
                 full_schema_context = "\n".join(schema_context_parts)
                 logger.debug(f"[API_CHAT_DB] Schema context for LLM: {full_schema_context}")
 
-                system_message_content = f"""You are a SQL expert. Your task is to generate a single, safe, read-only SQL SELECT query to answer the user's question.
-You will be provided with the database schema context.
-Follow these rules strictly:
-1. Base your query *only* on the tables and columns explicitly listed in the provided Database Schema Context.
-2. Do *not* invent or assume any table or column names that are not present in the schema.
-3. If the user's question involves filtering (e.g., by city, name, date), ensure the column you use for the WHERE clause exists in the schema and is appropriate for the filter.
-4. If the schema does not contain the necessary information to answer the question, or if the question is too ambiguous to translate into a SQL query based *only* on the provided schema, you MUST output the exact string: NO_QUERY_POSSIBLE
-5. Otherwise, output ONLY the SQL SELECT query. Do not include any explanations, natural language, or markdown formatting (like ```sql ... ```). Just the raw SQL query.
+#                 system_message_content = f"""You are a SQL expert. Your task is to generate a single, safe, read-only SQL SELECT query to answer the user's question.
+# You will be provided with the database schema context.
+# Follow these rules strictly:
+# 1. Base your query *only* on the tables and columns explicitly listed in the provided Database Schema Context.
+# 2. Do *not* invent or assume any table or column names that are not present in the schema.
+# 3. If the user's question involves filtering (e.g., by city, name, date), ensure the column you use for the WHERE clause exists in the schema and is appropriate for the filter.
+# 4. If the schema does not contain the necessary information to answer the question, or if the question is too ambiguous to translate into a SQL query based *only* on the provided schema, you MUST output the exact string: NO_QUERY_POSSIBLE
+# 5. Otherwise, output ONLY the SQL SELECT query. Do not include any explanations, natural language, or markdown formatting (like ```sql ... ```). Just the raw SQL query.
 
-Database Schema Context:
+# Database Schema Context:
+# {full_schema_context}
+# """
+                system_message_content = f"""== HARD RULES – FOLLOW STRICTLY ==
+① Use only the tables and columns that appear verbatim in the **Database Schema Context** block below.
+② Never invent, rename or infer table/column names.
+③ Before writing SQL, silently:
+    • list tables needed, then columns from each table,
+    • verify every identifier exists in the schema;
+    • if any do not, output NO_QUERY_POSSIBLE.
+④ Use aggregate functions (SUM, AVG, COUNT, MAX, MIN) **only if the user explicitly requests a total/average/count/etc.**
+    • If an aggregate is present, every non‑aggregated column in SELECT must be listed in GROUP BY.
+⑤ Every filter in the WHERE clause must reference an existing column appropriate to that filter.
+⑥ If any single part of the request cannot be mapped unambiguously to the schema, output exactly: NO_QUERY_POSSIBLE
+⑦ Output only a single, read‑only SQL SELECT statement. Do not include INSERT, UPDATE, DELETE, DROP, CREATE, ALTER, comments, explanations, markdown or back‑ticks.
+== DATABASE SCHEMA CONTEXT ==
+###
 {full_schema_context}
+###
 """
                 sql_generation_prompt_messages = [
                     {"role": "system", "content": system_message_content},
@@ -652,13 +669,13 @@ Database Schema Context:
                         user_facing_error = "It seems the information needed for your query (like a specific table or column) wasn't found in the database as expected. Could you try rephrasing or ensuring your question matches the database's structure?"
                     elif "syntax error" in str(error_detail).lower():
                         user_facing_error = "I had trouble constructing a valid query for the database based on your request."
-                    
+
                     logger.error(f"[API_CHAT_DB] SQL execution error: '{error_detail}'. SQL attempted: '{extracted_sql}'")
                     raise Exception(user_facing_error)
 
                 # If we reach here, the SQL query itself executed without returning an error structure.
                 formatted_db_results = format_db_results_for_prompt(extracted_sql, db_results_data, MAX_DB_RESULT_CHARS)
-                
+
                 # Fallback check if formatting itself reveals an issue not caught above (e.g. parsing error of non-error data)
                 # This also catches if extract_search_results itself returned an error dict (e.g. {"status": "error", "message": ...})
                 if "failed to parse" in formatted_db_results.lower() or \
