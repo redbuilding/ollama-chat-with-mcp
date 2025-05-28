@@ -560,7 +560,7 @@ async def process_chat_request(payload: ChatPayload) -> ChatResponse:
 
             except Exception as e:
                 logger.error(f"[API_CHAT] Web search processing error: {e}", exc_info=True)
-                assistant_error_message_obj = ChatMessage(role="assistant", content=f"⚠️ Web search failed: {str(e)[:100]}")
+                assistant_error_message_obj = ChatMessage(role="assistant", content=f"⚠️ Web search failed: {str(e)}")
 
     if payload.use_database and not assistant_error_message_obj:
         if not app_state.mcp_service_ready.get(MYSQL_DB_SERVICE_NAME, False):
@@ -673,7 +673,7 @@ Database Schema Context:
 
             except Exception as e:
                 logger.error(f"[API_CHAT_DB] Database interaction processing error: {e}", exc_info=True)
-                assistant_error_message_obj = ChatMessage(role="assistant", content=f"⚠️ Database interaction failed: {str(e)[:150]}")
+                assistant_error_message_obj = ChatMessage(role="assistant", content=f"⚠️ Database interaction failed: {str(e)}")
 
 
     if assistant_error_message_obj:
