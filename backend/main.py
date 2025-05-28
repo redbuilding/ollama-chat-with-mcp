@@ -411,6 +411,8 @@ def format_db_results_for_prompt(query: str, db_results: Union[Dict, List], max_
             data_to_format = json.loads(db_results)
 
         if isinstance(data_to_format, dict) and "error" in data_to_format:
+            # This case should ideally be caught before calling this function,
+            # but handle it defensively.
             return f"Database query '{query}' failed: {data_to_format['error']}"
 
         if isinstance(data_to_format, dict) and "rows" in data_to_format:
@@ -440,6 +442,7 @@ def format_db_results_for_prompt(query: str, db_results: Union[Dict, List], max_
 
             formatted_str = f"Database query results for '{query}':\n" + "\n".join(lines)
         else:
+            # This case might occur if db_results_data is a list of rows directly, or some other non-error structure
             formatted_str = f"Database query results for '{query}':\n{json.dumps(data_to_format, indent=2)}"
 
         if len(formatted_str) > max_chars:
@@ -571,11 +574,10 @@ async def process_chat_request(payload: ChatPayload) -> ChatResponse:
 
                 schema_context_parts = []
                 if tables_resp.get("status") == "success":
-                    # extract_search_results will parse the JSON string from the resource content
                     tables_data = extract_search_results(tables_resp.get("data"))
                     if isinstance(tables_data, list) and tables_data:
                         schema_context_parts.append(f"Available tables: {', '.join(tables_data[:5])}{'...' if len(tables_data) > 5 else ''}.")
-                        for table_name_from_list in tables_data[:2]: # Renamed to avoid conflict
+                        for table_name_from_list in tables_data[:2]:
                             schema_req_id = await submit_mcp_resource_request(MYSQL_DB_SERVICE_NAME, f"resource://tables/{table_name_from_list}/schema")
                             schema_resp = await wait_mcp_response(MYSQL_DB_SERVICE_NAME, schema_req_id)
                             if schema_resp.get("status") == "success":
@@ -585,9 +587,8 @@ async def process_chat_request(payload: ChatPayload) -> ChatResponse:
                                 schema_context_parts.append(f"Could not fetch schema for '{table_name_from_list}'. Error: {schema_resp.get('error', 'Unknown')}")
                     elif isinstance(tables_data, dict) and "error" in tables_data:
                          schema_context_parts.append(f"Could not list tables: {tables_data['error']}")
-                    else: # If tables_data is not a list (e.g. error from extract_search_results) or empty
+                    else:
                         schema_context_parts.append(f"Could not parse table list or no tables found. Raw: {str(tables_data)[:100]}")
-
                 else:
                     schema_context_parts.append(f"Could not retrieve table list from database. Error: {tables_resp.get('error', 'Unknown')}")
 
@@ -614,12 +615,10 @@ Database Schema Context:
 
                 extracted_sql = None
                 if raw_llm_sql_response:
-                    # Try to extract SQL from markdown code block first
                     sql_match = re.search(r"```(?:sql)?\s*([\s\S]+?)\s*```", raw_llm_sql_response, re.IGNORECASE)
                     if sql_match:
                         extracted_sql = sql_match.group(1).strip()
                     else:
-                        # Fallback: if no markdown, use the response directly, assuming it followed instructions
                         extracted_sql = raw_llm_sql_response.strip()
 
                 if extracted_sql and extracted_sql.upper() == "NO_QUERY_POSSIBLE":
@@ -630,32 +629,51 @@ Database Schema Context:
                     logger.error(f"[API_CHAT_DB] Could not extract a valid SQL SELECT query. LLM raw response: '{raw_llm_sql_response}'. Extracted: '{extracted_sql}'")
                     raise Exception(f"I had trouble generating a valid SQL query. The model's attempt was: {str(raw_llm_sql_response)[:150]}...")
 
-
                 logger.info(f"[API_CHAT_DB] LLM generated SQL (extracted): {extracted_sql}")
 
-                # server_mysql.py also checks, but good to have here as a safeguard before sending
                 if not extracted_sql.lower().strip().startswith("select "):
                     raise Exception("The generated query is not a SELECT query. For safety, only SELECT queries are allowed.")
 
                 query_req_id = await submit_mcp_tool_request(MYSQL_DB_SERVICE_NAME, "execute_sql_query_tool", {"query": extracted_sql})
                 query_resp = await wait_mcp_response(MYSQL_DB_SERVICE_NAME, query_req_id)
 
-                if query_resp.get("status") == "error":
-                    raise Exception(f"Database query execution failed: {query_resp.get('error', 'Unknown error')}")
+                if query_resp.get("status") == "error": # Handles MCP communication errors
+                    raise Exception(f"Database MCP tool communication failed: {query_resp.get('error', 'Unknown MCP error')}")
 
                 db_results_data = extract_search_results(query_resp.get("data"))
 
+                # Check for errors reported *by the database execution* within the data payload
+                if isinstance(db_results_data, dict) and "error" in db_results_data:
+                    error_detail = db_results_data["error"]
+                    user_facing_error = "I encountered an issue while querying the database."
+                    if "unknown column" in str(error_detail).lower() or \
+                       "no such table" in str(error_detail).lower() or \
+                       "doesn't exist" in str(error_detail).lower():
+                        user_facing_error = "It seems the information needed for your query (like a specific table or column) wasn't found in the database as expected. Could you try rephrasing or ensuring your question matches the database's structure?"
+                    elif "syntax error" in str(error_detail).lower():
+                        user_facing_error = "I had trouble constructing a valid query for the database based on your request."
+                    
+                    logger.error(f"[API_CHAT_DB] SQL execution error: '{error_detail}'. SQL attempted: '{extracted_sql}'")
+                    raise Exception(user_facing_error)
+
+                # If we reach here, the SQL query itself executed without returning an error structure.
                 formatted_db_results = format_db_results_for_prompt(extracted_sql, db_results_data, MAX_DB_RESULT_CHARS)
+                
+                # Fallback check if formatting itself reveals an issue not caught above (e.g. parsing error of non-error data)
+                # This also catches if extract_search_results itself returned an error dict (e.g. {"status": "error", "message": ...})
+                if "failed to parse" in formatted_db_results.lower() or \
+                   (isinstance(db_results_data, dict) and db_results_data.get("status") == "error"):
+                    logger.error(f"[API_CHAT_DB] Error formatting or parsing DB results. Formatted: '{formatted_db_results}'. Raw Data: '{str(db_results_data)[:200]}'")
+                    raise Exception("I received data from the database, but had trouble understanding or formatting it.")
 
                 db_html_indicator = f"<div class='db-indicator-custom'><b>💾 Database:</b> Info from query \"{extracted_sql[:50].replace('<', '&lt;').replace('>', '&gt;')}...\" was used.</div>"
-
                 prompt_for_llm = (f"Using the following database information related to '{user_msg_content}':\n{formatted_db_results}\n\n"
-                                  f"{prompt_for_llm}") # Append to existing prompt_for_llm if search was also used
+                                  f"{prompt_for_llm}")
                 logger.info(f"[API_CHAT_DB] Database interaction successful, enhanced prompt with DB results.")
 
             except Exception as e:
                 logger.error(f"[API_CHAT_DB] Database interaction processing error: {e}", exc_info=True)
-                assistant_error_message_obj = ChatMessage(role="assistant", content=f"⚠️ Database interaction failed: {str(e)[:100]}")
+                assistant_error_message_obj = ChatMessage(role="assistant", content=f"⚠️ Database interaction failed: {str(e)[:150]}")
 
 
     if assistant_error_message_obj:
